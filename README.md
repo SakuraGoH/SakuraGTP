@@ -143,8 +143,9 @@ SakuraGTP/
 ├── api_server.py            # HTTP API server
 ├── board_view.py            # Real-time board
 ├── winrate_view.py          # Winrate curve
-├── ssh_client.py            #SSH connection
+├── ssh_client.py            # SSH connection
 ├── ui_background.py         # Background image manager
+├── requirements.txt         # Environments you need
 └── SakuraGTP HTTP API 文档.md  # API documentation
 ```
 
