@@ -40,7 +40,7 @@ Since there was already an internal test version previously, the first release s
 
 ### Option 1: Download the prebuilt exe
 
-Download the latest `SakuraGTP.exe` from the [Releases](https://github.com/yourname/SakuraGTP/releases) page.
+Download the latest `SakuraGTP.exe` from the [Releases](https://github.com/SakuraGoH/SakuraGTP/releases) page.
 
 ### Option 2: Run from source
 
