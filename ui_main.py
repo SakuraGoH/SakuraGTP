@@ -1,7 +1,9 @@
 import socket
 import re
 import os
+import threading
 import secrets
+import time
 
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
@@ -20,6 +22,7 @@ from gtp_bridge import GTPBridge
 from board_view import BoardView
 from winrate_view import WinrateView
 from api_server import APIServer
+from runner import ContributeRunner
 
 
 class SakuraGTPApp(QMainWindow):
@@ -58,6 +61,10 @@ class SakuraGTPApp(QMainWindow):
         self.api_window = None
 
         self.api_server = APIServer(self, on_log=self._log_comm)
+        self.runner = ContributeRunner(on_log=self._log_comm)
+        self._last_game_time = time.time()
+        self._idle_thread = threading.Thread(target=self._idle_loop, daemon=True)
+        self._idle_thread.start()
 
         self._build_ui()
         self._connect_signals()
@@ -120,6 +127,8 @@ class SakuraGTPApp(QMainWindow):
 
         tools_menu = menubar.addMenu("工具")
         tools_menu.addAction("HTTP API", self._open_api_window)
+        tools_menu.addAction("自动跑谱设置", self._open_contribute_dialog)
+        tools_menu.addAction("手动停止跑谱", self._manual_stop_contribute)
         tools_menu.addSeparator()
         tools_menu.addAction("心跳设置", self._open_heartbeat_dialog)
         tools_menu.addAction("断线重连设置", self._open_reconnect_dialog)
@@ -404,6 +413,21 @@ class SakuraGTPApp(QMainWindow):
 
         shell_group.setLayout(shell_layout)
         layout.addWidget(shell_group)
+
+        # 跑谱状态
+        self.contribute_group = QGroupBox("跑谱状态")
+        contrib_layout = QHBoxLayout()
+        self.contribute_label = QLabel("未运行")
+        contrib_layout.addWidget(self.contribute_label)
+        self.btn_stop_contribute = QPushButton("停止跑谱")
+        self.btn_stop_contribute.setEnabled(False)
+        self.btn_stop_contribute.clicked.connect(self._manual_stop_contribute)
+        contrib_layout.addWidget(self.btn_stop_contribute)
+        contrib_layout.addStretch()
+        self.contribute_group.setLayout(contrib_layout)
+        layout.addWidget(self.contribute_group)
+
+        layout.addStretch()
 
         layout.addStretch()
 
@@ -701,6 +725,68 @@ class SakuraGTPApp(QMainWindow):
     def _on_engine_exit_signal(self):
         self.engine_exit_signal.emit()
 
+    # ---------- 自动跑谱 ----------
+    def _idle_loop(self):
+        while True:
+            time.sleep(10)
+            # 大前提 1：必须启用自动跑谱
+            if not self.cfg.get("auto_contribute", False):
+                continue
+            # 大前提 2：跑谱命令不能为空
+            if not self.cfg.get("contribute_command", "").strip():
+                continue
+            # 大前提 3：主对弈引擎必须已经启动
+            if not self.engine.is_running():
+                # 引擎没启动，如果跑谱还在跑，立刻停掉
+                if self.runner.is_running():
+                    self._stop_contribute()
+                continue
+            # 大前提 4：必须已经开启监听野狐客户端
+            if not self.fox.is_listening():
+                if self.runner.is_running():
+                    self._stop_contribute()
+                continue
+            # 大前提 5：当前不能正在对局
+            if self.bridge.last_move_number > 0:
+                if self.runner.is_running():
+                    self._stop_contribute()
+                continue
+            # 如果跑谱已经在跑，不重复启动
+            if self.runner.is_running():
+                continue
+            # 空闲时间判断
+            idle = time.time() - self._last_game_time
+            threshold = self.cfg.get("contribute_idle_seconds", 300)
+            if idle >= threshold:
+                self._start_contribute()
+
+    def _start_contribute(self):
+        if self.runner.is_running():
+            self._stop_contribute()
+        cmd = self.cfg.get("contribute_command", "").strip()
+        if not cmd:
+            return
+        ok, msg = self.runner.start(cmd)
+        self._log_comm(msg)
+        if ok:
+            self.contribute_label.setText("运行中")
+            self.btn_stop_contribute.setEnabled(True)
+
+    def _stop_contribute(self):
+        """只停止跑谱进程，不动配置，用于对局开始/引擎停止时"""
+        if self.runner.is_running():
+            self.runner.stop()
+            self._log_comm("跑谱已停止")
+        self.contribute_label.setText("未运行")
+        self.btn_stop_contribute.setEnabled(False)
+
+    def _manual_stop_contribute(self):
+        """用户手动点击停止跑谱，停止并关闭自动跑谱"""
+        self._stop_contribute()
+        self.cfg["auto_contribute"] = False
+        save_config(self.cfg)
+        self._log_comm("已手动停止跑谱，并关闭自动跑谱")
+
     def _port_in_use(self, port):
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
@@ -762,6 +848,7 @@ class SakuraGTPApp(QMainWindow):
 
     def _stop_fox(self):
         self.fox.stop()
+        self._last_game_time = time.time()
         self._log_comm("野狐监听已停止")
         self.btn_start_fox_local.setEnabled(True)
         self.btn_stop_fox_local.setEnabled(False)
@@ -791,6 +878,10 @@ class SakuraGTPApp(QMainWindow):
         self._log_gtp(f"已切换规则: {rule}")
 
     def _on_fox_command(self, command, items):
+        self._last_game_time = time.time()
+        if self.cfg.get("contribute_stop_on_game", True):
+            if self.runner.is_running():
+                self._stop_contribute()
         self.bridge.handle_fox_command(command, items)
         if command == "FARESULT":
             self.board_view.clear()
@@ -1415,6 +1506,58 @@ class SakuraGTPApp(QMainWindow):
         self.api_window = dlg
         dlg.show()
 
+    def _open_contribute_dialog(self):
+        dlg = QDialog(self)
+        dlg.setWindowTitle("自动跑谱设置")
+        dlg.resize(600, 300)
+
+        layout = QFormLayout(dlg)
+
+        chk = QCheckBox("启用自动跑谱")
+        chk.setChecked(self.cfg.get("auto_contribute", False))
+        layout.addRow("", chk)
+
+        cmd_edit = QLineEdit(self.cfg.get("contribute_command", ""))
+        cmd_edit.setPlaceholderText(
+            'katago.exe contribute -config contribute_example.cfg'
+        )
+        layout.addRow("跑谱命令:", cmd_edit)
+
+        idle_edit = QLineEdit(str(self.cfg.get("contribute_idle_seconds", 300)))
+        layout.addRow("空闲多少秒后启动:", idle_edit)
+
+        stop_chk = QCheckBox("有对局立刻停止跑谱")
+        stop_chk.setChecked(self.cfg.get("contribute_stop_on_game", True))
+        layout.addRow("", stop_chk)
+
+        hint = QLabel(
+            "提示：\n"
+            "1. 跑谱命令需要用户自备能跑谱的 KataGo 引擎和 contribute 配置文件。\n"
+            "2. 示例：katago.exe contribute -config contribute_example.cfg\n"
+            "3. contribute 配置里需要填 username、password。\n"
+            "4. 跑谱进程独立于对弈引擎，不冲突。"
+        )
+        hint.setWordWrap(True)
+        layout.addRow("", hint)
+
+        def on_save():
+            self.cfg["auto_contribute"] = chk.isChecked()
+            self.cfg["contribute_command"] = cmd_edit.text().strip()
+            try:
+                self.cfg["contribute_idle_seconds"] = int(idle_edit.text())
+            except ValueError:
+                self.cfg["contribute_idle_seconds"] = 300
+            self.cfg["contribute_stop_on_game"] = stop_chk.isChecked()
+            save_config(self.cfg)
+            self._log_comm("自动跑谱设置已保存")
+            dlg.accept()
+
+        btn = QPushButton("保存")
+        btn.clicked.connect(on_save)
+        layout.addRow("", btn)
+
+        dlg.exec_()
+
     def _on_api_window_closed(self):
         self.api_window = None
 
@@ -1635,6 +1778,9 @@ class SakuraGTPApp(QMainWindow):
                 QMessageBox.No
             )
             if ret == QMessageBox.Yes:
+                # 先停跑谱
+                if hasattr(self, "runner"):
+                    self.runner.stop()
                 self._stop_engine()
                 try:
                     self.fox.stop()
@@ -1642,11 +1788,16 @@ class SakuraGTPApp(QMainWindow):
                     pass
                 if self.api_server:
                     self.api_server.stop()
+                self._collect_cfg()
+                save_config(self.cfg)
                 event.accept()
             else:
                 event.ignore()
             return
 
+        # 引擎没运行，正常关闭
+        if hasattr(self, "runner"):
+            self.runner.stop()
         self._collect_cfg()
         save_config(self.cfg)
         try:
