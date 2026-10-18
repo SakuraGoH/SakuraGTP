@@ -53,6 +53,11 @@ DEFAULT_CONFIG = {
     "heartbeat_enabled": False,
     "heartbeat_interval": 30,       # 秒
     "heartbeat_timeout": 10,        # 秒，超过判定假死
+    # 自动跑谱
+    "auto_contribute": False,
+    "contribute_command": "",
+    "contribute_idle_seconds": 300,     # 空闲多少秒后启动跑谱
+    "contribute_stop_on_game": True,    # 有对局立刻停止
 
     # 断线重连
     "auto_reconnect": True,
@@ -102,6 +107,14 @@ def load_config():
                 cfg["api_token_enabled"] = False
             if "api_token" not in cfg:
                 cfg["api_token"] = ""
+            if "auto_contribute" not in cfg:
+                cfg["auto_contribute"] = False
+            if "contribute_command" not in cfg:
+                cfg["contribute_command"] = ""
+            if "contribute_idle_seconds" not in cfg:
+                cfg["contribute_idle_seconds"] = 300
+            if "contribute_stop_on_game" not in cfg:
+                cfg["contribute_stop_on_game"] = True
             return cfg
         except Exception:
             return DEFAULT_CONFIG.copy()

@@ -138,5 +138,8 @@ class FoxClientServer:
                 self.server_sock = None
         return True
 
+    def is_listening(self):
+        return self._running and self.server_sock is not None
+
     def is_connected(self):
         return self.client_sock is not None

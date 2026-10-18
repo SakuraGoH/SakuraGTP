@@ -149,8 +149,12 @@ class EngineManager:
             # 发心跳
             self._heartbeat_cmd_id += 1
             cid = self._heartbeat_cmd_id
+            hb_cmd = f"{cid} protocol_version"
             try:
-                self.send(f"{cid} protocol_version")
+                # 先记录到 GTP Shell
+                if self.on_output:
+                    self.on_output(f">>> [心跳] {hb_cmd}")
+                self.send(hb_cmd)
             except Exception:
                 pass
             # 等待响应
