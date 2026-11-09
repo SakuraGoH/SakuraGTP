@@ -16,12 +16,12 @@ class GTPBridge:
         self.komi = 6.5
         self.ai_color = "B"
         self.handicap_moves = []
+        self._handicap_vertices = []
 
         self.fox_moves = {}
         self.ai_moves = {}
         self.last_move_number = 0
 
-        self.live_winrate = False
         self.max_time = 5.0
         self.max_visits = 0
         self.max_playouts = 0
@@ -51,8 +51,7 @@ class GTPBridge:
             self.on_log(msg)
 
     def set_live_winrate(self, enabled):
-        self.live_winrate = bool(enabled)
-        self.log(f"实时胜率模式: {'开' if self.live_winrate else '关'}")
+        self.log("实时胜率已合并到 genmove_analyze，开关无效")
 
     def set_max_time(self, seconds):
         self.max_time = float(seconds)
@@ -125,6 +124,7 @@ class GTPBridge:
                     handicap_vertices.append(vertex)
             except Exception:
                 pass
+        self._handicap_vertices = list(handicap_vertices)
 
         self._send_gtp("clear_board", "clear_board")
         self._send_gtp(f"boardsize {self.board_size}", "boardsize")
@@ -136,6 +136,11 @@ class GTPBridge:
         self.fox_moves = {}
         self.ai_moves = {}
         self.last_move_number = 0
+        # 让子手数用负数（0, -1, -2...），避免与野狐正式手数 1、2 冲突
+        for i, vertex in enumerate(handicap_vertices):
+            hand_no = -i
+            self.fox_moves[hand_no] = ("B", vertex)
+            self.ai_moves[hand_no] = ("B", vertex)
         self._candidates = {}
         self._candidates_dirty = False
         if self.on_candidate:
@@ -153,16 +158,29 @@ class GTPBridge:
         self.ai_moves = {}
         self.last_move_number = 0
 
+        handicap_vertices = getattr(self, "_handicap_vertices", [])
+        handicap_set = set(handicap_vertices)
+        for i, vertex in enumerate(handicap_vertices):
+            hand_no = -i
+            self.fox_moves[hand_no] = ("B", vertex)
+            self.ai_moves[hand_no] = ("B", vertex)
+
         for mv in items[2:]:
             try:
                 n, x, y, c = mv.split("^")
                 n = int(n)
                 vertex = self._xy_to_gtp(int(x), int(y))
                 color = "B" if c == "B" else "W"
+                if vertex in handicap_set:
+                    # 让子已由 set_free_handicap 下过，不重复 play
+                    self.fox_moves[n] = (color, vertex)
+                    self.ai_moves[n] = (color, vertex)
+                    self.last_move_number = max(self.last_move_number, n)
+                    continue
                 self._send_gtp(f"play {color} {vertex}", "play")
                 self.fox_moves[n] = (color, vertex)
                 self.ai_moves[n] = (color, vertex)
-                self.last_move_number = n
+                self.last_move_number = max(self.last_move_number, n)
             except Exception as e:
                 self.log(f"重放落子失败: {mv} {e}")
 
@@ -217,6 +235,7 @@ class GTPBridge:
         self.fox_moves = {}
         self.ai_moves = {}
         self.last_move_number = 0
+        self._handicap_vertices = []
         self._candidates = {}
         self._candidates_dirty = False
         if self.on_candidate:
@@ -234,21 +253,26 @@ class GTPBridge:
         self._candidates = {}
         self._candidates_dirty = False
         self._analyze_color = color
-        self._pending_genmove = False
 
-        if self.live_winrate:
+        with self._lock:
+            if self._pending_genmove:
+                self.log("上一次 genmove_analyze 尚未完成，跳过本次")
+                return
+            self._pending_genmove = True
             self._analyzing = True
             self._analyze_start = time.time()
-            if self.max_time > 0:
-                self._send_gtp(f"kata-set-param maxTime {self.max_time}", "set_param")
-            self._send_gtp(f"kata-analyze {color} interval 50 maxmoves 10", "analyze")
-            self.log(f"开始实时分析 {color}")
-        else:
-            with self._lock:
-                if not self._pending_genmove:
-                    self._pending_genmove = True
-                    self._send_gtp(f"genmove {color}", "genmove")
-                    self.log(f"请求 genmove {color}")
+
+        if self.max_time > 0:
+            self._send_gtp(f"kata-set-param maxTime {self.max_time}", "set_param")
+        if self.max_visits > 0:
+            self._send_gtp(f"kata-set-param maxVisits {self.max_visits}", "set_param")
+        if self.max_playouts > 0:
+            self._send_gtp(f"kata-set-param maxPlayouts {self.max_playouts}", "set_param")
+        self._send_gtp(
+            f"kata-genmove_analyze {color} interval 50 maxmoves 10",
+            "genmove_analyze",
+        )
+        self.log(f"请求 kata-genmove_analyze {color}")
 
     def _stop_analyze(self):
         if not self._analyzing:
@@ -266,35 +290,12 @@ class GTPBridge:
             if not self._analyzing:
                 continue
             elapsed = time.time() - self._analyze_start
-            if elapsed >= self.max_time:
-                self._commit_live_move()
+            if self.max_time > 0 and elapsed >= self.max_time + 10:
+                self.log(f"genmove_analyze 已等待 {elapsed:.1f} 秒，仍未返回落子")
+                self._analyze_start = time.time()
 
     def _commit_live_move(self):
-        if not self._candidates:
-            self.log("无候选，无法落子")
-            return
-        cands = sorted(self._candidates.values(), key=lambda c: c.get("order", 999))
-        best = cands[0]
-        gtp_vertex = best["vertex"]
-        x, y = best["move"]
-        color = self._analyze_color
-
-        self._analyzing = False
-        self._candidates_dirty = False
-        self._send_gtp("stop", "stop")
-        self._candidates = {}
-        if self.on_candidate:
-            self.on_candidate([])
-
-        self._send_gtp(f"play {color} {gtp_vertex}", "play")
-
-        self.last_move_number += 1
-        n = self.last_move_number
-        move_str = f"{n}^{x}^{y}^{color}"
-        self.send_to_fox("AFPLAY", color, move_str)
-        self.log(f"发送落子: {gtp_vertex} -> AFPLAY {color} {move_str}")
-        self.fox_moves[n] = (color, gtp_vertex)
-        self.ai_moves[n] = (color, gtp_vertex)
+        self.log("genmove_analyze 模式下由引擎自动返回落子，本地不再主动落子")
 
     def _candidate_flush_loop(self):
         while True:
@@ -306,6 +307,23 @@ class GTPBridge:
                                    key=lambda c: c.get("order", 999))
                     self.on_candidate(cands[:20])
 
+    def _finish_genmove_analyze(self, body):
+        body = (body or "").strip()
+        if not body:
+            self.log("genmove_analyze 返回空，忽略")
+            return
+        tokens = body.split()
+        move = tokens[-1]
+        if len(tokens) >= 2 and tokens[0].lower() == "play":
+            move = tokens[-1]
+        if not re.match(r"^([A-HJ-T])(\d{1,2})$", move.upper()) \
+                and move.lower() not in ("pass", "resign"):
+            self.log(f"genmove_analyze 非落子响应，忽略: {body!r}")
+            return
+        self._analyzing = False
+        self._analyze_start = 0
+        self._send_move_to_fox(move)
+
     def on_engine_output(self, line):
         line = line.rstrip("\r\n")
         if not line:
@@ -313,31 +331,62 @@ class GTPBridge:
 
         stripped = line.strip()
 
+        # 格式 1：=7 Q16（带命令号）
         m = re.search(r"=(\d+)\s+([A-Ta-t]\d+|pass|resign|PASS|RESIGN)", stripped)
         if m:
             resp_id = int(m.group(1))
             body = m.group(2)
-            purpose = self._id_purpose.pop(resp_id, "")
+            purpose = self._id_purpose.get(resp_id, "")
             self.log(f"GTP响应(交错): id={resp_id}, purpose={purpose}, body={body!r}")
-            if purpose == "genmove":
+            if purpose in ("genmove", "genmove_analyze"):
+                self._id_purpose.pop(resp_id, None)
                 with self._lock:
                     self._pending_genmove = False
-                self._send_move_to_fox(body)
+                self._finish_genmove_analyze(body)
                 return
             if purpose == "final_score":
+                self._id_purpose.pop(resp_id, None)
                 with self._lock:
                     self._pending_final_score = False
                 self._send_score_to_fox(body)
                 return
 
-        if stripped.startswith("info move"):
-            self._parse_info_move(stripped)
+        # 格式 2：= Q16 / = play Q16（无命令号）
+        m3 = re.match(r"^=\s+([A-Ta-t]\d+|pass|resign|PASS|RESIGN|play\s+[A-Ta-t]\d+)$",
+                      stripped, re.IGNORECASE)
+        if m3 and self._pending_genmove:
+            body = m3.group(1)
+            self.log(f"捕获 genmove_analyze 裸 = 响应: {stripped!r}")
+            with self._lock:
+                self._pending_genmove = False
+            self._finish_genmove_analyze(body)
+            return
+
+        # 格式 3：play Q16（裸行，无 = 前缀，kata-genmove_analyze 主要输出）
+        m2 = re.match(r"^play\s+([A-Ta-t]\d+|pass|resign)$", stripped, re.IGNORECASE)
+        if m2 and self._pending_genmove:
+            body = m2.group(1)
+            self.log(f"捕获 genmove_analyze 裸 play 行: {stripped!r}")
+            with self._lock:
+                self._pending_genmove = False
+            self._finish_genmove_analyze(body)
+            return
+
+        # info move（兼容 "info move ..." 和 "= info move ..."）
+        info_line = stripped
+        if info_line.startswith("="):
+            info_line = info_line[1:].strip()
+            if info_line and info_line[0].isdigit():
+                parts = info_line.split(" ", 1)
+                info_line = parts[1].strip() if len(parts) > 1 else ""
+        if info_line.startswith("info move"):
+            self._parse_info_move(info_line)
             return
 
         if self.on_engine_raw:
             self.on_engine_raw(line)
 
-        if not stripped or stripped[0] not in "=?":
+        if not stripped or stripped[0] not in "=?!":
             return
 
         body = stripped[1:].strip()
@@ -350,15 +399,21 @@ class GTPBridge:
                 resp_id = None
             body = parts[1].strip() if len(parts) > 1 else ""
 
-        purpose = self._id_purpose.pop(resp_id, "") if resp_id else ""
+        purpose = self._id_purpose.get(resp_id, "") if resp_id else ""
         self.log(f"GTP响应: id={resp_id}, purpose={purpose}, body={body!r}")
 
-        if purpose == "genmove":
+        if purpose in ("genmove", "genmove_analyze"):
+            if not body:
+                return
+            self._id_purpose.pop(resp_id, None)
             with self._lock:
                 self._pending_genmove = False
-            self._send_move_to_fox(body)
+            self._finish_genmove_analyze(body)
             return
         if purpose == "final_score":
+            if not body:
+                return
+            self._id_purpose.pop(resp_id, None)
             with self._lock:
                 self._pending_final_score = False
             self._send_score_to_fox(body)
@@ -366,49 +421,48 @@ class GTPBridge:
 
     def _parse_info_move(self, line):
         try:
-            m = re.search(r"info move ([A-T]\d+)", line)
-            if not m:
+            # KataGo 一行可能包含多个 "info move XXX ..."，用 finditer 全部解析
+            matches = list(re.finditer(r"info move ([A-Ta-t]\d+)", line))
+            if not matches:
                 return
-            move = m.group(1)
+            for idx, m in enumerate(matches):
+                move = m.group(1).upper()
+                seg_start = m.end()
+                seg_end = matches[idx + 1].start() if idx + 1 < len(matches) else len(line)
+                seg = line[seg_start:seg_end]
 
-            visits = 0
-            winrate = 0.0
-            score = 0.0
-            order = 999
+                visits = 0
+                winrate = 0.0
+                score = 0.0
+                order = 999
 
-            m = re.search(r"visits (\d+)", line)
-            if m:
-                visits = int(m.group(1))
-            m = re.search(r"winrate ([\d.]+)", line)
-            if m:
-                winrate = float(m.group(1))
-            m = re.search(r"scoreLead (-?[\d.]+)", line)
-            if m:
-                score = float(m.group(1))
-            m = re.search(r"order (\d+)", line)
-            if m:
-                order = int(m.group(1))
+                mm = re.search(r"visits (\d+)", seg)
+                if mm:
+                    visits = int(mm.group(1))
+                mm = re.search(r"winrate ([\d.]+)", seg)
+                if mm:
+                    winrate = float(mm.group(1))
+                mm = re.search(r"scoreLead (-?[\d.]+)", seg)
+                if mm:
+                    score = float(mm.group(1))
+                mm = re.search(r"order (\d+)", seg)
+                if mm:
+                    order = int(mm.group(1))
 
-            v = self._gtp_to_xy(move)
-            if not v:
-                return
+                v = self._gtp_to_xy(move)
+                if not v:
+                    continue
 
-            cand = {
-                "move": v,
-                "vertex": move,
-                "visits": visits,
-                "winrate": winrate,
-                "score": score,
-                "order": order,
-            }
-            self._candidates[move] = cand
-            self._candidates_dirty = True
-
-            if order == 0:
-                if self.max_visits > 0 and visits >= self.max_visits:
-                    self._commit_live_move()
-                elif self.max_playouts > 0 and visits >= self.max_playouts:
-                    self._commit_live_move()
+                cand = {
+                    "move": v,
+                    "vertex": move,
+                    "visits": visits,
+                    "winrate": winrate,
+                    "score": score,
+                    "order": order,
+                }
+                self._candidates[move] = cand
+                self._candidates_dirty = True
         except Exception as e:
             self.log(f"info move 解析失败: {e}")
 
