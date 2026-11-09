@@ -1,14 +1,14 @@
 # SakuraGTP
 
 SakuraGTP is an open-source AI connector for **FoxGo(FoxWeiqi)**.  
-It bridges GTP-compatible AI engines (KataGo, LeelaZero, etc.) with the FoxGo client, providing real-time winrate curves, candidate move visualization(not as good as I anticipate), HTTP API, and remote SSH support.Currently, only Chinese is supported. However, in the future, I will decide whether to add support for English and other languages based on my personal mood.
+It bridges GTP-compatible AI engines (KataGo, LeelaZero, etc.) with the FoxGo client, providing real-time winrate curves, candidate move visualization, HTTP API, and remote SSH support.Currently, only Chinese is supported. However, in the future, I will decide whether to add support for English and other languages based on my personal mood.
 Since there was already an internal test version previously, the first release started with v1.4.0
 
 ---
 
 ## Features
 
-- **Local engine support**: KataGo, LeelaZero, and any GTP-compatible engine.
+- **Local engine support**: KataGo, LeelaZero, and any GTP-compatible engine.However, in terms of compatibility, KataGo is much better than any others engines.
 - **Remote engine support**: Built-in SSH client (no external `plink` needed), or custom command line (plink, ikatago, etc.).
 - **Real-time board**: Live candidate moves with winrate, score lead, and visit counts.
 - **Winrate curve**: Real-time winrate and score lead curves, exportable as PNG.
