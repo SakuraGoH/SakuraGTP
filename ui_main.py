@@ -34,7 +34,7 @@ class SakuraGTPApp(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("SakuraGTP 1.4.1 - 野狐围棋 AI 连线器")
+        self.setWindowTitle("SakuraGTP 1.5.0 - 野狐围棋 AI 连线器")
         self.resize(1800, 1000)
 
         self.cfg = load_config()
@@ -68,7 +68,7 @@ class SakuraGTPApp(QMainWindow):
 
         self._build_ui()
         self._connect_signals()
-        self._on_live_winrate_change(False)
+        self._apply_engine_params()
 
         bg_color = self.cfg.get("bg_color", "#F0F0F0")
         self._apply_bg_color(bg_color)
@@ -341,14 +341,9 @@ class SakuraGTPApp(QMainWindow):
 
         layout.addWidget(self.mode_stack)
 
-        # 实时胜率
-        live_group = QGroupBox("实时胜率")
+        # 落子参数（已合并到 genmove_analyze，始终可见）
+        live_group = QGroupBox("落子参数（genmove_analyze）")
         live_layout = QVBoxLayout()
-
-        self.live_winrate_check = QCheckBox("启用实时胜率（分析模式）")
-        self.live_winrate_check.setChecked(False)
-        self.live_winrate_check.stateChanged.connect(self._on_live_winrate_change)
-        live_layout.addWidget(self.live_winrate_check)
 
         self.winrate_param_widget = QWidget()
         param_layout = QFormLayout(self.winrate_param_widget)
@@ -368,7 +363,7 @@ class SakuraGTPApp(QMainWindow):
         self.btn_refresh_state.clicked.connect(self._refresh_state)
         param_layout.addRow("", self.btn_refresh_state)
 
-        self.winrate_param_widget.setVisible(False)
+        self.winrate_param_widget.setVisible(True)
         live_layout.addWidget(self.winrate_param_widget)
 
         live_group.setLayout(live_layout)
@@ -627,16 +622,22 @@ class SakuraGTPApp(QMainWindow):
             self._stop_engine()
             return
 
-        if not comm_cmd and config_path:
-            cfg_vals = self._load_gtp_cfg(config_path)
-            if "max_time" in cfg_vals:
-                self.max_time_edit.setText(cfg_vals["max_time"])
-            if "max_visits" in cfg_vals:
-                self.max_visits_edit.setText(cfg_vals["max_visits"])
-            if "max_playouts" in cfg_vals:
-                self.max_playouts_edit.setText(cfg_vals["max_playouts"])
+        # 确定实际使用的 gtp.cfg 路径：优先命令行里的 -config，其次 UI 里的 config_path
+        effective_config = ""
+        if comm_cmd:
+            effective_config = self._extract_config_from_cmd(comm_cmd)
+        if not effective_config:
+            effective_config = config_path
 
-        self._on_live_winrate_change(self.live_winrate_check.checkState())
+        if effective_config:
+            cfg_vals = self._load_gtp_cfg(effective_config)
+            # 无条件覆盖：未出现或被注释 -> 0；未注释 -> 配置文件里的值
+            self.max_time_edit.setText(cfg_vals["max_time"])
+            self.max_visits_edit.setText(cfg_vals["max_visits"])
+            self.max_playouts_edit.setText(cfg_vals["max_playouts"])
+            self._log_comm(f"从配置文件读取落子参数: {effective_config}")
+
+        self._apply_engine_params()
 
         if engine_path:
             push_history(self.cfg, "engine_history", engine_path)
@@ -940,11 +941,7 @@ class SakuraGTPApp(QMainWindow):
                 if self.winrate_window is not None and self._detached_view is not None:
                     self._detached_view.set_stdev(stdev)
 
-    def _on_live_winrate_change(self, state):
-        enabled = bool(state)
-        self.bridge.set_live_winrate(enabled)
-        self.winrate_param_widget.setVisible(enabled)
-
+    def _apply_engine_params(self):
         try:
             self.bridge.set_max_time(float(self.max_time_edit.text()))
         except ValueError:
@@ -959,30 +956,66 @@ class SakuraGTPApp(QMainWindow):
             pass
 
     def _refresh_state(self):
-        try:
-            self.bridge.set_max_time(float(self.max_time_edit.text()))
-        except ValueError:
-            pass
-        try:
-            self.bridge.set_max_visits(int(self.max_visits_edit.text()))
-        except ValueError:
-            pass
-        try:
-            self.bridge.set_max_playouts(int(self.max_playouts_edit.text()))
-        except ValueError:
-            pass
+        self._apply_engine_params()
         self._log_comm("参数已刷新")
 
     def _do_update_board(self):
-        stones = {}
-        for n, (color, vertex) in self.bridge.fox_moves.items():
+        board = {}
+        played = []
+        # 让子手数为负数，sorted 后排在最前，先画让子再画正式手数
+        for n in sorted(self.bridge.fox_moves.keys()):
+            color, vertex = self.bridge.fox_moves[n]
             v = self.bridge._gtp_to_xy(vertex)
-            if v:
-                stones[n] = (color, v[0], v[1])
+            if not v:
+                continue
+            x, y = v
+            if (x, y) in board:
+                continue
+            board[(x, y)] = color
+            played.append((n, color, x, y))
+            self._remove_captured(board, x, y, color)
+
+        stones = {}
+        for n, color, x, y in played:
+            if board.get((x, y)) == color:
+                stones[n] = (color, x, y)
         self.board_view.set_stones(stones)
-        if stones:
-            last_n = max(stones.keys())
-            self.board_view.set_last_move(stones[last_n])
+        if played:
+            self.board_view.set_last_move((played[-1][1], played[-1][2], played[-1][3]))
+
+    def _remove_captured(self, board, x, y, color):
+        opponent = "W" if color == "B" else "B"
+        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            nx, ny = x + dx, y + dy
+            if (nx, ny) not in board or board[(nx, ny)] != opponent:
+                continue
+            group = self._collect_group(board, nx, ny)
+            if not self._has_liberty(board, group):
+                for gx, gy in group:
+                    board.pop((gx, gy), None)
+
+    def _collect_group(self, board, x, y):
+        color = board[(x, y)]
+        stack = [(x, y)]
+        seen = set()
+        while stack:
+            cx, cy = stack.pop()
+            if (cx, cy) in seen:
+                continue
+            seen.add((cx, cy))
+            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                nx, ny = cx + dx, cy + dy
+                if (nx, ny) in board and board[(nx, ny)] == color and (nx, ny) not in seen:
+                    stack.append((nx, ny))
+        return seen
+
+    def _has_liberty(self, board, group):
+        for gx, gy in group:
+            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                nx, ny = gx + dx, gy + dy
+                if (nx, ny) not in board:
+                    return True
+        return False
 
     def _on_show_cand_change(self, state):
         self.board_view.set_show_candidates(bool(state))
@@ -1595,27 +1628,66 @@ class SakuraGTPApp(QMainWindow):
         QMessageBox.information(self, "SakuraGTP", "配置已保存")
 
     def _load_gtp_cfg(self, config_path):
-        result = {}
+        """
+        从 gtp.cfg 读取 maxTime / maxVisits / maxPlayouts。
+        返回 dict，包含 max_time / max_visits / max_playouts 三个 key：
+        - 参数未出现或出现但被 # 注释：值设为 0
+        - 参数存在且未注释：值为配置文件里的数值（字符串）
+        同时返回 raw 记录，便于调试。
+        """
+        result = {
+            "max_time": "0",
+            "max_visits": "0",
+            "max_playouts": "0",
+        }
+        found = {
+            "max_time": False,
+            "max_visits": False,
+            "max_playouts": False,
+        }
         try:
             with open(config_path, "r", encoding="utf-8") as f:
                 for line in f:
-                    s = line.strip()
-                    if not s or s.startswith("#"):
+                    raw = line.strip()
+                    if not raw:
                         continue
+                    commented = raw.startswith("#")
+                    if commented:
+                        s = raw.lstrip("#").strip()
+                    else:
+                        s = raw
                     if "=" not in s:
                         continue
                     key, val = s.split("=", 1)
                     key = key.strip()
                     val = val.strip()
                     if key == "maxTime":
-                        result["max_time"] = val
+                        found["max_time"] = True
+                        result["max_time"] = "0" if commented else val
                     elif key == "maxVisits":
-                        result["max_visits"] = val
+                        found["max_visits"] = True
+                        result["max_visits"] = "0" if commented else val
                     elif key == "maxPlayouts":
-                        result["max_playouts"] = val
+                        found["max_playouts"] = True
+                        result["max_playouts"] = "0" if commented else val
         except Exception:
             pass
         return result
+
+    def _extract_config_from_cmd(self, cmd):
+        """
+        从命令行里解析 -config / --config 后面的路径。
+        支持带引号和不带引号。
+        """
+        if not cmd:
+            return ""
+        # 匹配 -config "xxx" / -config xxx / --config "xxx" / --config xxx
+        m = re.search(r'(?:^|\s)--?config\s+("([^"]+)"|(\S+))', cmd)
+        if not m:
+            return ""
+        if m.group(2):
+            return m.group(2)
+        return m.group(3) or ""
 
     # ---------- API 回调 ----------
     def _api_status(self):
@@ -1627,7 +1699,7 @@ class SakuraGTPApp(QMainWindow):
             "board_size": self.bridge.board_size,
             "komi": self.bridge.komi,
             "last_move_number": self.bridge.last_move_number,
-            "live_winrate": self.bridge.live_winrate,
+            "mode": "genmove_analyze",
         }
 
     def _api_board(self):
@@ -1740,7 +1812,7 @@ class SakuraGTPApp(QMainWindow):
     def _show_env_help(self):
         QMessageBox.information(
             self, "依赖环境",
-            "SakuraGTP 1.4.1 依赖环境\n\n"
+            "SakuraGTP 1.5.0 依赖环境\n\n"
             "Windows 10 / 11，64 位\n"
             "VC++ 2010 x86 / VC++ 2015-2022 x64\n"
             "AI 引擎 (KataGo / LeelaZero)\n"
@@ -1756,6 +1828,8 @@ class SakuraGTPApp(QMainWindow):
             "3. 开始监听\n"
             "4. 野狐客户端连接 127.0.0.1:6000\n"
             "5. 接受对局，AI 自动落子\n\n"
+            "落子与分析已合并为 kata-genmove_analyze：\n"
+            "  AI 落子的同时实时显示选点、胜率、目差、计算量。\n\n"
             "工具菜单：\n"
             "  HTTP API：启动本地 API\n"
             "  心跳设置：检测引擎假死\n"
@@ -1766,7 +1840,7 @@ class SakuraGTPApp(QMainWindow):
     def _show_about(self):
         QMessageBox.information(
             self, "关于",
-            "SakuraGTP 1.4.1\n野狐围棋 AI 连线器"
+            "SakuraGTP 1.5.0\n野狐围棋 AI 连线器"
         )
 
     def closeEvent(self, event):
