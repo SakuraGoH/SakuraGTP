@@ -203,7 +203,7 @@ class BoardView(QWidget):
     def _draw_candidate(self, painter, rank, cand):
         x, y = cand["move"]
         px, py = self._px(x, y)
-        r = self.cell // 2 - 2
+        r = self.cell // 2 - 1
         base_color = self.RANK_COLORS[rank % len(self.RANK_COLORS)]
 
         fill_color = QColor(base_color.red(), base_color.green(), base_color.blue(), 90)
@@ -219,7 +219,7 @@ class BoardView(QWidget):
         score = cand.get("score", 0.0)
         visits = cand.get("visits", 0)
 
-        font_size = max(4, self.cell // 8)
+        font_size = max(5, self.cell // 7)
         line1 = f"{wr:.0f}%"
         line2 = self._short_visits(visits)
         line3 = f"{score:+.1f}"
@@ -233,12 +233,12 @@ class BoardView(QWidget):
         else:
             text_color = QColor(20, 20, 20)
 
-        gap = font_size * 1.1
+        gap = font_size * 2.4
         self._draw_text_center(painter, line1, px, py - gap, font_size, text_color)
         self._draw_text_center(painter, line2, px, py, font_size, text_color)
         self._draw_text_center(painter, line3, px, py + gap, font_size, text_color)
 
-        nr = max(3, self.cell // 12)
+        nr = max(4, self.cell // 10)
         nx = px + r - nr // 2
         ny = py - r + nr // 2
         painter.setBrush(QBrush(QColor(255, 255, 255, 220)))
