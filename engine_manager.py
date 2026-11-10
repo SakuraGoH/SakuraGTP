@@ -274,9 +274,16 @@ class EngineManager:
 
     def stop(self):
         with self._lock:
+            was_running = self._running
             self._running = False
             if self._ssh_mode:
                 if hasattr(self, "_ssh_channel") and self._ssh_channel:
+                    if self.on_output:
+                        self.on_output(">>> [停止] quit")
+                    try:
+                        self._ssh_channel.send("quit\n")
+                    except Exception:
+                        pass
                     try:
                         self._ssh_channel.close()
                     except Exception:
@@ -290,16 +297,33 @@ class EngineManager:
                     self.ssh_client = None
                 self._ssh_mode = False
             if self.proc:
+                # 先发 GTP quit，让引擎自然退出
                 try:
-                    if os.name == "nt":
-                        self.proc.terminate()
-                    else:
-                        self.proc.send_signal(signal.SIGTERM)
-                    time.sleep(0.3)
-                    if self.proc.poll() is None:
-                        self.proc.kill()
+                    if self.proc.stdin and self.proc.poll() is None:
+                        if self.on_output:
+                            self.on_output(">>> [停止] quit")
+                        self.proc.stdin.write(b"quit\n")
+                        self.proc.stdin.flush()
                 except Exception:
                     pass
+                # 给引擎最多 2 秒自然退出
+                deadline = time.time() + 2.0
+                while time.time() < deadline:
+                    if self.proc.poll() is not None:
+                        break
+                    time.sleep(0.05)
+                # 超时未退出则强制终止
+                if self.proc.poll() is None:
+                    try:
+                        if os.name == "nt":
+                            self.proc.terminate()
+                        else:
+                            self.proc.send_signal(signal.SIGTERM)
+                        time.sleep(0.3)
+                        if self.proc.poll() is None:
+                            self.proc.kill()
+                    except Exception:
+                        pass
                 self.proc = None
         return True
 

@@ -694,6 +694,8 @@ class SakuraGTPApp(QMainWindow):
         self.btn_mode_ssh.setEnabled(False)
 
     def _stop_engine(self):
+        if self.engine.is_running():
+            self._log_comm("发送 GTP: quit")
         self.engine.stop()
         self._log_comm("引擎已停止")
         self.btn_start_engine.setEnabled(True)
