@@ -986,9 +986,12 @@ class SakuraGTPApp(QMainWindow):
             self.board_view.set_last_move((played[-1][1], played[-1][2], played[-1][3]))
 
     def _remove_captured(self, board, x, y, color):
+        size = self.bridge.board_size
         opponent = "W" if color == "B" else "B"
         for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
             nx, ny = x + dx, y + dy
+            if not (0 <= nx < size and 0 <= ny < size):
+                continue
             if (nx, ny) not in board or board[(nx, ny)] != opponent:
                 continue
             group = self._collect_group(board, nx, ny)
@@ -997,6 +1000,7 @@ class SakuraGTPApp(QMainWindow):
                     board.pop((gx, gy), None)
 
     def _collect_group(self, board, x, y):
+        size = self.bridge.board_size
         color = board[(x, y)]
         stack = [(x, y)]
         seen = set()
@@ -1007,14 +1011,19 @@ class SakuraGTPApp(QMainWindow):
             seen.add((cx, cy))
             for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
                 nx, ny = cx + dx, cy + dy
+                if not (0 <= nx < size and 0 <= ny < size):
+                    continue
                 if (nx, ny) in board and board[(nx, ny)] == color and (nx, ny) not in seen:
                     stack.append((nx, ny))
         return seen
 
     def _has_liberty(self, board, group):
+        size = self.bridge.board_size
         for gx, gy in group:
             for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
                 nx, ny = gx + dx, gy + dy
+                if not (0 <= nx < size and 0 <= ny < size):
+                    continue
                 if (nx, ny) not in board:
                     return True
         return False
