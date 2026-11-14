@@ -15,8 +15,6 @@ Since there was already an internal test version previously, the first release s
 - **HTTP API**: Local JSON API for external tools, analysis scripts, and integrations.
 - **GTP Shell**: Send GTP commands directly to the engine.
 - **Rule switching**: One-click switch between Chinese and Japanese rules.
-- **Dark mode**: Dark board and dark winrate curve themes.
-- **Customizable UI**: Adjustable background color for the whole interface.
 - **Auto reconnect**: Automatically recover after Fox Go client disconnection.
 - **Heartbeat**: Optional engine heartbeat to detect unresponsive engines.
 - **API Token**: Optional token authentication for the HTTP API.
@@ -126,28 +124,6 @@ pyinstaller --onefile --windowed --name SakuraGTP ^
 ```
 
 The output is `dist/SakuraGTP.exe`.
-
----
-
-## Project Structure
-
-```
-SakuraGTP/
-├── main.py                  # Entry point
-├── ui_main.py               # Main UI
-├── config.py                # Configuration management
-├── engine_manager.py        # Engine process management
-├── fox_client.py            # Fox Go client TCP server
-├── gtp_bridge.py            # GTP protocol bridge
-├── protocol_fox.py          # Fox Go AI protocol encoder/decoder
-├── api_server.py            # HTTP API server
-├── board_view.py            # Real-time board
-├── winrate_view.py          # Winrate curve
-├── ssh_client.py            # SSH connection
-├── ui_background.py         # Background image manager
-├── requirements.txt         # Environments you need
-└── SakuraGTP HTTP API 文档.md  # API documentation
-```
 
 ---
 
