@@ -1,6 +1,6 @@
 import json
 import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
 
 
@@ -32,7 +32,8 @@ class APIServer:
             return False, "API 已在运行"
         try:
             handler = self._make_handler()
-            self.httpd = HTTPServer((self.host, self.port), handler)
+            self.httpd = ThreadingHTTPServer((self.host, self.port), handler)
+            self.httpd.daemon_threads = True
             self._running = True
             self._thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
             self._thread.start()
@@ -102,7 +103,7 @@ class APIServer:
                 if path == "/":
                     self._send_json({
                         "name": "SakuraGTP API",
-                        "version": "1.3.3",
+                        "version": "1.5.0",
                         "auth": server.token_enabled,
                         "endpoints": [
                             "GET /status",
@@ -122,7 +123,7 @@ class APIServer:
                     })
                     return
                 if path == "/version":
-                    self._send_json({"version": "1.3.3"})
+                    self._send_json({"version": "1.5.0"})
                     return
                 if path == "/status":
                     self._send_json(app._api_status())

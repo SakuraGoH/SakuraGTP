@@ -33,7 +33,6 @@ class ContributeRunner:
                     stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
-                    bufsize=0,
                     creationflags=creationflags,
                 )
                 self._running = True
@@ -50,21 +49,16 @@ class ContributeRunner:
         proc = self.proc
         if not proc:
             return
-        buffer = b""
-        while self._running and proc.poll() is None:
-            try:
-                chunk = proc.stdout.read(1)
-                if not chunk:
-                    time.sleep(0.01)
-                    continue
-                buffer += chunk
-                if chunk == b"\n":
-                    text = buffer.decode("utf-8", errors="ignore").rstrip()
-                    buffer = b""
-                    if text:
-                        self.log(text)
-            except Exception:
-                break
+        try:
+            while self._running:
+                line = proc.stdout.readline()
+                if not line:
+                    break
+                text = line.decode("utf-8", errors="ignore").rstrip()
+                if text:
+                    self.log(text)
+        except Exception:
+            pass
         self._running = False
 
     def stop(self):

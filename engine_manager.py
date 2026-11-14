@@ -1,8 +1,8 @@
+import os
+import signal
 import subprocess
 import threading
 import time
-import os
-import signal
 
 try:
     import paramiko
@@ -12,9 +12,19 @@ except ImportError:
 
 
 class EngineManager:
+    """
+    AI 引擎进程管理器。
+
+    支持三种启动方式：
+    - 本地引擎（自动拼命令行或用户自定义命令行 / plink）
+    - 内嵌 SSH（paramiko 连远程主机执行命令）
+    统一通过 on_output 行回调输出，支持 GTP 心跳假死检测。
+    """
+
     def __init__(self, on_output=None, on_error=None, on_exit=None):
         self.proc = None
         self.ssh_client = None
+        self._ssh_channel = None
         self.on_output = on_output
         self.on_error = on_error
         self.on_exit = on_exit
@@ -31,6 +41,7 @@ class EngineManager:
         self._last_heartbeat_reply = 0
         self._heartbeat_thread = None
         self._heartbeat_cmd_id = 0
+        self._hb_generation = 0
 
     def set_heartbeat(self, enabled, interval=30, timeout=10):
         self.heartbeat_enabled = bool(enabled)
@@ -51,15 +62,14 @@ class EngineManager:
             if extra_args:
                 parts.append(extra_args)
             return " ".join(parts)
-        else:
-            parts = [f'"{engine_path}"', "--gtp", "--quiet", "--noponder"]
-            if weight_path:
-                parts.append(f'-w "{weight_path}"')
-            if config_path:
-                parts.append(f'--config "{config_path}"')
-            if extra_args:
-                parts.append(extra_args)
-            return " ".join(parts)
+        parts = [f'"{engine_path}"', "--gtp", "--quiet", "--noponder"]
+        if weight_path:
+            parts.append(f'-w "{weight_path}"')
+        if config_path:
+            parts.append(f'--config "{config_path}"')
+        if extra_args:
+            parts.append(extra_args)
+        return " ".join(parts)
 
     def start(self, engine_path, weight_path, config_path, extra_args="", remote_cmd=""):
         with self._lock:
@@ -93,7 +103,6 @@ class EngineManager:
                     stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
-                    bufsize=0,
                     creationflags=creationflags,
                 )
                 self._running = True
@@ -110,24 +119,19 @@ class EngineManager:
         proc = self.proc
         if not proc:
             return
-        buffer = b""
-        while self._running and proc.poll() is None:
-            try:
-                chunk = proc.stdout.read(1)
-                if not chunk:
-                    time.sleep(0.01)
-                    continue
-                buffer += chunk
-                if chunk == b"\n":
-                    text = buffer.decode("utf-8", errors="ignore").rstrip()
-                    buffer = b""
-                    if text and self.on_output:
-                        # 心跳响应检测
-                        if "protocol_version" in text or text.strip().startswith("="):
-                            self._last_heartbeat_reply = time.time()
-                        self.on_output(text)
-            except Exception:
-                break
+        try:
+            while self._running:
+                line = proc.stdout.readline()
+                if not line:
+                    break
+                text = line.decode("utf-8", errors="ignore").rstrip()
+                if text and self.on_output:
+                    # 心跳响应检测
+                    if "protocol_version" in text or text.strip().startswith("="):
+                        self._last_heartbeat_reply = time.time()
+                    self.on_output(text)
+        except Exception:
+            pass
 
         self._running = False
         if self.on_exit:
@@ -137,14 +141,19 @@ class EngineManager:
     def _start_heartbeat(self):
         if not self.heartbeat_enabled:
             return
+        self._hb_generation += 1
         self._last_heartbeat_reply = time.time()
-        self._heartbeat_thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
+        gen = self._hb_generation
+        self._heartbeat_thread = threading.Thread(
+            target=self._heartbeat_loop, args=(gen,), daemon=True
+        )
         self._heartbeat_thread.start()
 
-    def _heartbeat_loop(self):
-        while self._running:
+    def _heartbeat_loop(self, gen):
+        # gen 保证旧引擎实例的心跳线程不会影响新实例
+        while self._running and gen == self._hb_generation:
             time.sleep(self.heartbeat_interval)
-            if not self._running:
+            if not (self._running and gen == self._hb_generation):
                 break
             # 发心跳
             self._heartbeat_cmd_id += 1
@@ -159,7 +168,7 @@ class EngineManager:
                 pass
             # 等待响应
             time.sleep(self.heartbeat_timeout)
-            if not self._running:
+            if not (self._running and gen == self._hb_generation):
                 break
             elapsed = time.time() - self._last_heartbeat_reply
             if elapsed > self.heartbeat_timeout + 2:
@@ -194,6 +203,8 @@ class EngineManager:
             if password:
                 kwargs["password"] = password
             ssh.connect(**kwargs)
+            # NAT 保活，防止长时间无流量被路由器断开
+            ssh.get_transport().set_keepalive(30)
             self.ssh_client = ssh
         except Exception as e:
             self.ssh_client = None
@@ -253,7 +264,7 @@ class EngineManager:
 
     def send(self, text):
         with self._lock:
-            if self._ssh_mode and hasattr(self, "_ssh_channel") and self._ssh_channel:
+            if self._ssh_mode and self._ssh_channel:
                 try:
                     if not text.endswith("\n"):
                         text += "\n"
@@ -276,8 +287,9 @@ class EngineManager:
         with self._lock:
             was_running = self._running
             self._running = False
+            self._hb_generation += 1
             if self._ssh_mode:
-                if hasattr(self, "_ssh_channel") and self._ssh_channel:
+                if self._ssh_channel:
                     if self.on_output:
                         self.on_output(">>> [停止] quit")
                     try:
@@ -328,6 +340,6 @@ class EngineManager:
         return True
 
     def is_running(self):
-        if self._ssh_mode and hasattr(self, "_ssh_channel") and self._ssh_channel:
+        if self._ssh_mode and self._ssh_channel:
             return self._running and not self._ssh_channel.closed
         return self._running and self.proc is not None and self.proc.poll() is None
