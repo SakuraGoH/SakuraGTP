@@ -1,5 +1,7 @@
 from PyQt5.QtWidgets import QWidget, QSizePolicy
-from PyQt5.QtGui import QPainter, QColor, QPen, QBrush, QFont, QPixmap
+from PyQt5.QtGui import (
+    QPainter, QColor, QPen, QBrush, QFont, QPixmap, QRadialGradient,
+)
 from PyQt5.QtCore import Qt, QPointF
 
 
@@ -33,27 +35,37 @@ class BoardView(QWidget):
         self.max_candidates = 10
         self.show_candidates = True
 
-        # 默认颜色（亮色）
-        self.bg_color = QColor(232, 196, 138)
-        self.line_color = QColor(90, 58, 26)
-        self.star_color = QColor(90, 58, 26)
+        # 默认暗色星空（与主背景统一）
+        self._apply_theme(True)
 
         self.base_pixmap = None
         self._last_side = 0
 
-    def set_dark_mode(self, dark):
-        """切换暗色棋盘"""
+    # ---------- 主题 ----------
+    def _apply_theme(self, dark):
         if dark:
-            self.bg_color = QColor(40, 40, 40)
-            self.line_color = QColor(180, 180, 180)
-            self.star_color = QColor(180, 180, 180)
+            # 科幻暗色：无底，只留半透明网格线与坐标，完全透出星空
+            self.bg_color = QColor(13, 20, 34, 0)
+            self.line_color = QColor(96, 154, 200)
+            self.star_color = QColor(0, 229, 255)
+            self.label_color = QColor(150, 190, 224)
+            self.last_move_color = QColor(0, 229, 255)
+            self.dark = True
         else:
             self.bg_color = QColor(232, 196, 138)
             self.line_color = QColor(90, 58, 26)
             self.star_color = QColor(90, 58, 26)
+            self.label_color = QColor(90, 58, 26)
+            self.last_move_color = QColor(220, 40, 40)
+            self.dark = False
+
+    def set_dark_mode(self, dark):
+        """切换暗色棋盘"""
+        self._apply_theme(dark)
         self._last_side = 0
         self.update()
 
+    # ---------- 几何 ----------
     def _calc_geometry(self):
         w = self.width()
         h = self.height()
@@ -87,13 +99,17 @@ class BoardView(QWidget):
     def _offset_y(self):
         return max(0, (self.height() - self.board_px) // 2)
 
+    # ---------- 底图（无底：只画半透明网格线与坐标，完全透出星空） ----------
     def _render_base_pixmap(self):
         pm = QPixmap(self.board_px, self.board_px)
-        pm.fill(self.bg_color)
+        pm.fill(Qt.transparent)
         painter = QPainter(pm)
         painter.setRenderHint(QPainter.Antialiasing, True)
 
-        pen = QPen(self.line_color)
+        line_a = 150 if self.dark else 170
+        label_a = 225 if self.dark else 220
+        pen = QPen(QColor(self.line_color.red(), self.line_color.green(),
+                          self.line_color.blue(), line_a))
         pen.setWidth(1)
         painter.setPen(pen)
         m = self.margin
@@ -104,17 +120,12 @@ class BoardView(QWidget):
             y = m + i * self.cell
             painter.drawLine(m, y, m + (self.size - 1) * self.cell, y)
 
-        painter.setBrush(QBrush(self.star_color))
-        stars = [(3, 3), (3, 9), (3, 15), (9, 3), (9, 9), (9, 15), (15, 3), (15, 9), (15, 15)]
-        for sx, sy in stars:
-            px, py = self._px(sx, sy)
-            sr = max(2, self.cell // 16)
-            painter.drawEllipse(QPointF(px, py), sr, sr)
-
         font_size = max(5, self.cell // 5)
         font = QFont("Arial", font_size)
+        font.setBold(self.dark)
         painter.setFont(font)
-        painter.setPen(QPen(self.line_color))
+        painter.setPen(QPen(QColor(self.label_color.red(), self.label_color.green(),
+                                   self.label_color.blue(), label_a)))
         letters = "ABCDEFGHJKLMNOPQRST"
 
         top_y = self.margin // 2 + font_size // 2
@@ -130,6 +141,7 @@ class BoardView(QWidget):
         painter.end()
         return pm
 
+    # ---------- 数据接口 ----------
     def set_stones(self, stones):
         self.stones = stones
         self.update()
@@ -156,6 +168,7 @@ class BoardView(QWidget):
         self.candidates = []
         self.update()
 
+    # ---------- 绘制 ----------
     def paintEvent(self, event):
         self._ensure_base()
         if self.base_pixmap is None:
@@ -175,13 +188,7 @@ class BoardView(QWidget):
 
         if self.last_move:
             color, x, y = self.last_move
-            px, py = self._px(x, y)
-            r = self.cell // 2 - 2
-            pen = QPen(QColor(255, 0, 0))
-            pen.setWidth(2)
-            painter.setPen(pen)
-            painter.setBrush(Qt.NoBrush)
-            painter.drawEllipse(QPointF(px, py), r, r)
+            self._draw_last_move(painter, x, y)
 
         if self.show_candidates:
             for rank, cand in enumerate(self.candidates[:self.max_candidates]):
@@ -192,12 +199,44 @@ class BoardView(QWidget):
     def _draw_stone(self, painter, color, x, y):
         px, py = self._px(x, y)
         r = self.cell // 2 - 3
+
+        # 阴影
+        shadow = QColor(0, 0, 0, 60)
+        painter.setBrush(QBrush(shadow))
+        painter.setPen(Qt.NoPen)
+        painter.drawEllipse(QPointF(px + max(1, r // 8), py + max(1, r // 6)), r, r)
+
+        # 径向渐变棋子
+        grad = QRadialGradient(QPointF(px - r / 3, py - r / 3), r * 1.35)
         if color == "B":
-            painter.setBrush(QBrush(QColor(0, 0, 0)))
-            painter.setPen(QPen(QColor(0, 0, 0)))
+            grad.setColorAt(0.0, QColor(88, 96, 110))
+            grad.setColorAt(0.55, QColor(32, 36, 46))
+            grad.setColorAt(1.0, QColor(8, 10, 16))
+            painter.setBrush(QBrush(grad))
+            painter.setPen(QPen(QColor(0, 0, 0), 1))
         else:
-            painter.setBrush(QBrush(QColor(255, 255, 255)))
-            painter.setPen(QPen(QColor(0, 0, 0)))
+            grad.setColorAt(0.0, QColor(255, 255, 255))
+            grad.setColorAt(0.7, QColor(240, 242, 246))
+            grad.setColorAt(1.0, QColor(196, 202, 214))
+            painter.setBrush(QBrush(grad))
+            painter.setPen(QPen(QColor(110, 116, 128), 1))
+        painter.drawEllipse(QPointF(px, py), r, r)
+
+    def _draw_last_move(self, painter, x, y):
+        px, py = self._px(x, y)
+        r = self.cell // 2 - 2
+
+        # 外圈霓虹光环
+        halo = QColor(self.last_move_color)
+        halo.setAlpha(70)
+        painter.setBrush(QBrush(halo))
+        painter.setPen(Qt.NoPen)
+        painter.drawEllipse(QPointF(px, py), r + 2, r + 2)
+
+        pen = QPen(self.last_move_color)
+        pen.setWidth(2)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
         painter.drawEllipse(QPointF(px, py), r, r)
 
     def _draw_candidate(self, painter, rank, cand):
@@ -225,13 +264,16 @@ class BoardView(QWidget):
         line3 = f"{score:+.1f}"
 
         # 暗色背景下文字用白色
-        r_bg = self.bg_color.red()
-        g_bg = self.bg_color.green()
-        b_bg = self.bg_color.blue()
-        if 0.299 * r_bg + 0.587 * g_bg + 0.114 * b_bg < 128:
-            text_color = QColor(240, 240, 240)
+        if self.dark:
+            text_color = QColor(235, 244, 255)
         else:
-            text_color = QColor(20, 20, 20)
+            r_bg = self.bg_color.red()
+            g_bg = self.bg_color.green()
+            b_bg = self.bg_color.blue()
+            if 0.299 * r_bg + 0.587 * g_bg + 0.114 * b_bg < 128:
+                text_color = QColor(240, 240, 240)
+            else:
+                text_color = QColor(20, 20, 20)
 
         gap = font_size * 2.4
         self._draw_text_center(painter, line1, px, py - gap, font_size, text_color)

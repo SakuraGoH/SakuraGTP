@@ -1,19 +1,18 @@
-import socket
-import re
 import os
+import re
+import socket
 import threading
-import secrets
 import time
+import math
 
 from PyQt5.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QLineEdit, QPushButton, QComboBox, QFileDialog, QMessageBox,
-    QTabWidget, QTextEdit, QCheckBox, QSpinBox, QGroupBox, QFormLayout,
-    QDialog, QListWidget, QPlainTextEdit, QSlider, QScrollArea,
-    QStackedWidget
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
+    QLineEdit, QFileDialog, QMessageBox,
+    QTextEdit, QFormLayout,
+    QDialog, QScrollArea, QStackedWidget, QAction, QActionGroup,
 )
-from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtGui import QColor, QPalette
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QEvent
+from PyQt5.QtGui import QColor, QPalette, QPainter
 
 from config import load_config, save_config, push_history
 from engine_manager import EngineManager
@@ -23,6 +22,15 @@ from board_view import BoardView
 from winrate_view import WinrateView
 from api_server import APIServer
 from runner import ContributeRunner
+import theme
+from theme import build_app_stylesheet, placeholder_color, is_dark, set_active_palette, sci_fi_bg
+from sci_widgets import (
+    GlowButton, GlowLineEdit, GlowComboBox, GlowCheckBox,
+    HudGroupBox, SciFiTabWidget,
+)
+from starfield import Starfield, DAY_CYCLE_SEC
+from starcursor import make_star_cursor, StarTrailWidget
+import ui_dialogs
 
 
 class SakuraGTPApp(QMainWindow):
@@ -36,6 +44,7 @@ class SakuraGTPApp(QMainWindow):
         super().__init__()
         self.setWindowTitle("SakuraGTP 1.5.0 - 野狐围棋 AI 连线器")
         self.resize(1800, 1000)
+        self.setMinimumSize(1480, 860)
 
         self.cfg = load_config()
 
@@ -63,6 +72,17 @@ class SakuraGTPApp(QMainWindow):
         self.api_server = APIServer(self, on_log=self._log_comm)
         self.runner = ContributeRunner(on_log=self._log_comm)
         self._last_game_time = time.time()
+
+        # 深空星图背景
+        self._starfield = Starfield()
+        self._bg_mode = self.cfg.get("bg_mode", "starfield")
+        if self._bg_mode not in ("starfield", "daynight"):
+            self._bg_mode = "starfield"
+        self._dark_ui = True
+        self._twinkle_timer = QTimer(self)
+        self._twinkle_timer.setInterval(80)
+        self._twinkle_timer.timeout.connect(self.update)
+
         self._idle_thread = threading.Thread(target=self._idle_loop, daemon=True)
         self._idle_thread.start()
 
@@ -70,13 +90,15 @@ class SakuraGTPApp(QMainWindow):
         self._connect_signals()
         self._apply_engine_params()
 
-        bg_color = self.cfg.get("bg_color", "#F0F0F0")
-        self._apply_bg_color(bg_color)
+        # 四芒星光标 + 流星尾迹
+        self.setCursor(make_star_cursor())
+        self._trail = StarTrailWidget(self)
+        self._trail.resize(self.size())
+        self._trail.raise_()
+        QApplication.instance().installEventFilter(self)
 
-        if self.cfg.get("dark_winrate_bg", False):
-            self.winrate_view.set_dark_mode(True)
-        if self.cfg.get("dark_board_bg", False):
-            self.board_view.set_dark_mode(True)
+        # 统一科幻暗色主题（星空）；棋盘与胜率曲线默认同为星空暗色
+        self._apply_bg_color(sci_fi_bg())
 
         self.ssh_host_edit.setText(self.cfg.get("ssh_host", ""))
         self.ssh_port_edit.setText(self.cfg.get("ssh_port", "22"))
@@ -113,6 +135,79 @@ class SakuraGTPApp(QMainWindow):
             ok, msg = self.api_server.start()
             self._log_comm(msg)
 
+        self._build_status_bar()
+
+    # ============================================================ 星图背景
+    def eventFilter(self, obj, event):
+        """全局鼠标移动 -> 主界面范围内的流星尾迹。"""
+        if event.type() == QEvent.MouseMove and getattr(self, "_trail", None):
+            try:
+                w = QApplication.widgetAt(event.globalPos())
+                if w is not None and (w is self or self.isAncestorOf(w)):
+                    self._trail.add_point(self._trail.mapFromGlobal(event.globalPos()))
+            except Exception:
+                pass
+        return super().eventFilter(obj, event)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        trail = getattr(self, "_trail", None)
+        if trail is not None:
+            trail.resize(self.size())
+            trail.raise_()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        day = 0.0
+        if self._bg_mode == "daynight":
+            phase = (time.time() % DAY_CYCLE_SEC) / DAY_CYCLE_SEC
+            day = 0.5 - 0.5 * math.cos(2.0 * math.pi * phase)
+        self._starfield.paint(p, self.width(), self.height(), time.time(), day)
+        p.end()
+
+    def _set_bg_mode(self, mode):
+        if self._bg_mode == mode:
+            return
+        self._bg_mode = mode
+        self.cfg["bg_mode"] = mode
+        save_config(self.cfg)
+        self.update()
+
+    # ============================================================ 状态栏
+    def _build_status_bar(self):
+        bar = self.statusBar()
+        self._sb_engine = QLabel()
+        self._sb_fox = QLabel()
+        self._sb_game = QLabel()
+        for w in (self._sb_engine, self._sb_fox, self._sb_game):
+            bar.addPermanentWidget(w)
+        self._status_timer = QTimer(self)
+        self._status_timer.setInterval(800)
+        self._status_timer.timeout.connect(self._update_status_bar)
+        self._status_timer.start()
+        self._update_status_bar()
+
+    def _update_status_bar(self):
+        pal = theme.pal()
+        if self.engine.is_running():
+            self._sb_engine.setText(
+                f"<span style='color:{pal['ok'].name()}'>●</span> 引擎运行中")
+        else:
+            self._sb_engine.setText(
+                f"<span style='color:{pal['danger'].name()}'>●</span> 引擎已停止")
+        if self.fox.is_connected():
+            self._sb_fox.setText(
+                f"<span style='color:{pal['accent'].name()}'>●</span> 野狐已连接")
+        elif self.fox.is_listening():
+            self._sb_fox.setText(
+                f"<span style='color:#FFD54F'>●</span> 野狐监听中")
+        else:
+            self._sb_fox.setText(
+                f"<span style='color:{pal['dim'].name()}'>●</span> 野狐未监听")
+        n = max(0, self.bridge.last_move_number)
+        self._sb_game.setText(f"手数 {n} · AI {self.bridge.ai_color}")
+
+    # ============================================================ UI 构建
     def _build_ui(self):
         menubar = self.menuBar()
 
@@ -120,10 +215,21 @@ class SakuraGTPApp(QMainWindow):
         file_menu.addAction("保存配置", self._save_cfg)
         file_menu.addAction("退出", self.close)
 
-        view_menu = menubar.addMenu("视图")
-        view_menu.addAction("界面背景色", self._open_bg_color_dialog)
-        view_menu.addAction("暗色胜率曲线背景", self._toggle_dark_winrate)
-        view_menu.addAction("暗色棋盘", self._toggle_dark_board)
+        view_menu = menubar.addMenu("个性化")
+        self.act_starfield = QAction("星空背景", self, checkable=True)
+        self.act_daynight = QAction("昼夜更替（3 分钟循环）", self, checkable=True)
+        bg_group = QActionGroup(self)
+        bg_group.setExclusive(True)
+        bg_group.addAction(self.act_starfield)
+        bg_group.addAction(self.act_daynight)
+        view_menu.addAction(self.act_starfield)
+        view_menu.addAction(self.act_daynight)
+        self.act_starfield.setChecked(self._bg_mode == "starfield")
+        self.act_daynight.setChecked(self._bg_mode == "daynight")
+        self.act_starfield.toggled.connect(
+            lambda on: on and self._set_bg_mode("starfield"))
+        self.act_daynight.toggled.connect(
+            lambda on: on and self._set_bg_mode("daynight"))
 
         tools_menu = menubar.addMenu("工具")
         tools_menu.addAction("HTTP API", self._open_api_window)
@@ -145,26 +251,31 @@ class SakuraGTPApp(QMainWindow):
 
         left_scroll = QScrollArea()
         left_scroll.setWidgetResizable(True)
-        left_scroll.setMinimumWidth(840)
-        left_scroll.setMaximumWidth(1100)
+        left_scroll.setMinimumWidth(880)
+        left_scroll.setMaximumWidth(1040)
         left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         left_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         left_scroll.setFrameShape(QScrollArea.NoFrame)
+        left_scroll.viewport().setObjectName("sfViewport")
+        left_scroll.viewport().setAttribute(Qt.WA_OpaquePaintEvent, False)
+        left_scroll.viewport().setAutoFillBackground(False)
 
         left = QWidget()
         left_layout = QVBoxLayout(left)
         self._build_left(left_layout)
         left_scroll.setWidget(left)
+        # setWidget 会把 autoFill 重新打开，必须在之后关闭（透出星图）
+        left.setAutoFillBackground(False)
 
         self.left_scroll = left_scroll
         self._build_right(main_layout, left_scroll)
 
     def _build_left(self, layout):
-        mode_group = QGroupBox("引擎模式")
+        mode_group = HudGroupBox("引擎模式")
         mode_layout = QHBoxLayout()
-        self.btn_mode_local = QPushButton("本地引擎")
+        self.btn_mode_local = GlowButton("本地引擎")
         self.btn_mode_local.clicked.connect(lambda: self._switch_mode("local"))
-        self.btn_mode_ssh = QPushButton("SSH 连接")
+        self.btn_mode_ssh = GlowButton("SSH 连接")
         self.btn_mode_ssh.clicked.connect(lambda: self._switch_mode("ssh"))
         mode_layout.addWidget(self.btn_mode_local)
         mode_layout.addWidget(self.btn_mode_ssh)
@@ -178,42 +289,42 @@ class SakuraGTPApp(QMainWindow):
         local_layout = QVBoxLayout(local_page)
         local_layout.setContentsMargins(0, 0, 0, 0)
 
-        engine_group = QGroupBox("本地引擎设置")
+        engine_group = HudGroupBox("本地引擎设置")
         engine_form = QFormLayout()
         engine_form.setVerticalSpacing(10)
         engine_form.setHorizontalSpacing(8)
         engine_form.setContentsMargins(8, 8, 8, 8)
 
-        self.engine_combo = QComboBox()
+        self.engine_combo = GlowComboBox()
         self.engine_combo.setEditable(True)
         self.engine_combo.addItems(self.cfg.get("engine_history", []))
         self.engine_combo.setCurrentText(self.cfg.get("engine_path", ""))
         self.engine_combo.setMinimumHeight(34)
-        self.btn_browse_engine = QPushButton("浏览")
+        self.btn_browse_engine = GlowButton("浏览")
         self.btn_browse_engine.clicked.connect(self._browse_engine)
         row = QHBoxLayout()
         row.addWidget(self.engine_combo)
         row.addWidget(self.btn_browse_engine)
         engine_form.addRow("引擎:", row)
 
-        self.weight_combo = QComboBox()
+        self.weight_combo = GlowComboBox()
         self.weight_combo.setEditable(True)
         self.weight_combo.addItems(self.cfg.get("weight_history", []))
         self.weight_combo.setCurrentText(self.cfg.get("weight_path", ""))
         self.weight_combo.setMinimumHeight(34)
-        self.btn_browse_weight = QPushButton("浏览")
+        self.btn_browse_weight = GlowButton("浏览")
         self.btn_browse_weight.clicked.connect(self._browse_weight)
         row = QHBoxLayout()
         row.addWidget(self.weight_combo)
         row.addWidget(self.btn_browse_weight)
         engine_form.addRow("权重:", row)
 
-        self.config_combo = QComboBox()
+        self.config_combo = GlowComboBox()
         self.config_combo.setEditable(True)
         self.config_combo.addItems(self.cfg.get("config_history", []))
         self.config_combo.setCurrentText(self.cfg.get("config_path", ""))
         self.config_combo.setMinimumHeight(34)
-        self.btn_browse_config = QPushButton("浏览")
+        self.btn_browse_config = GlowButton("浏览")
         self.btn_browse_config.clicked.connect(self._browse_config)
         row = QHBoxLayout()
         row.addWidget(self.config_combo)
@@ -221,13 +332,13 @@ class SakuraGTPApp(QMainWindow):
         engine_form.addRow("配置:", row)
 
         comm_row = QHBoxLayout()
-        self.comm_cmd_edit = QLineEdit(self.cfg.get("comm_cmd", ""))
+        self.comm_cmd_edit = GlowLineEdit(self.cfg.get("comm_cmd", ""))
         self.comm_cmd_edit.setPlaceholderText(
             '通用命令行（本地或 plink/ikatago），例如: plink -ssh ...'
         )
         comm_row.addWidget(self.comm_cmd_edit, stretch=1)
 
-        btn_auto_cmd = QPushButton("自动生成")
+        btn_auto_cmd = GlowButton("自动生成")
         btn_auto_cmd.clicked.connect(self._auto_gen_cmd)
         comm_row.addWidget(btn_auto_cmd)
         engine_form.addRow("通用命令行:", comm_row)
@@ -236,24 +347,24 @@ class SakuraGTPApp(QMainWindow):
         local_layout.addWidget(engine_group)
 
         local_btn_layout = QHBoxLayout()
-        self.btn_start_engine = QPushButton("启动引擎")
+        self.btn_start_engine = GlowButton("启动引擎")
         self.btn_start_engine.clicked.connect(self._start_engine)
-        self.btn_stop_engine = QPushButton("停止引擎")
+        self.btn_stop_engine = GlowButton("停止引擎")
         self.btn_stop_engine.clicked.connect(self._stop_engine)
         self.btn_stop_engine.setEnabled(False)
         local_btn_layout.addWidget(self.btn_start_engine)
         local_btn_layout.addWidget(self.btn_stop_engine)
         local_layout.addLayout(local_btn_layout)
 
-        local_fox_group = QGroupBox("野狐客户端监听")
+        local_fox_group = HudGroupBox("野狐客户端监听")
         local_fox_layout = QHBoxLayout()
         local_fox_layout.addWidget(QLabel("端口:"))
-        self.fox_port_edit = QLineEdit(str(self.cfg.get("fox_listen_port", 6000)))
+        self.fox_port_edit = GlowLineEdit(str(self.cfg.get("fox_listen_port", 6000)))
         self.fox_port_edit.setFixedWidth(80)
         local_fox_layout.addWidget(self.fox_port_edit)
-        self.btn_start_fox_local = QPushButton("开始监听")
+        self.btn_start_fox_local = GlowButton("开始监听")
         self.btn_start_fox_local.clicked.connect(self._start_fox)
-        self.btn_stop_fox_local = QPushButton("停止监听")
+        self.btn_stop_fox_local = GlowButton("停止监听")
         self.btn_stop_fox_local.clicked.connect(self._stop_fox)
         self.btn_stop_fox_local.setEnabled(False)
         local_fox_layout.addWidget(self.btn_start_fox_local)
@@ -269,39 +380,39 @@ class SakuraGTPApp(QMainWindow):
         ssh_layout = QVBoxLayout(ssh_page)
         ssh_layout.setContentsMargins(0, 0, 0, 0)
 
-        ssh_group = QGroupBox("SSH 连接设置")
+        ssh_group = HudGroupBox("SSH 连接设置")
         ssh_form = QFormLayout()
         ssh_form.setVerticalSpacing(10)
         ssh_form.setHorizontalSpacing(8)
         ssh_form.setContentsMargins(8, 8, 8, 8)
 
-        self.ssh_host_edit = QLineEdit("")
+        self.ssh_host_edit = GlowLineEdit("")
         self.ssh_host_edit.setPlaceholderText("远程 IP 或域名")
         ssh_form.addRow("主机:", self.ssh_host_edit)
 
-        self.ssh_port_edit = QLineEdit("22")
+        self.ssh_port_edit = GlowLineEdit("22")
         self.ssh_port_edit.setFixedWidth(80)
         ssh_form.addRow("端口:", self.ssh_port_edit)
 
-        self.ssh_user_edit = QLineEdit("")
+        self.ssh_user_edit = GlowLineEdit("")
         self.ssh_user_edit.setPlaceholderText("用户名")
         ssh_form.addRow("用户名:", self.ssh_user_edit)
 
-        self.ssh_pass_edit = QLineEdit("")
+        self.ssh_pass_edit = GlowLineEdit("")
         self.ssh_pass_edit.setEchoMode(QLineEdit.Password)
         self.ssh_pass_edit.setPlaceholderText("密码（可选）")
         ssh_form.addRow("密码:", self.ssh_pass_edit)
 
         key_row = QHBoxLayout()
-        self.ssh_key_edit = QLineEdit("")
+        self.ssh_key_edit = GlowLineEdit("")
         self.ssh_key_edit.setPlaceholderText("私钥路径（可选）")
         key_row.addWidget(self.ssh_key_edit, stretch=1)
-        btn_browse_key = QPushButton("浏览")
+        btn_browse_key = GlowButton("浏览")
         btn_browse_key.clicked.connect(self._browse_ssh_key)
         key_row.addWidget(btn_browse_key)
         ssh_form.addRow("私钥:", key_row)
 
-        self.ssh_cmd_edit = QLineEdit("")
+        self.ssh_cmd_edit = GlowLineEdit("")
         self.ssh_cmd_edit.setPlaceholderText(
             '例: cd /root && ./katago gtp -model model.bin.gz -config gtp.cfg'
         )
@@ -311,24 +422,24 @@ class SakuraGTPApp(QMainWindow):
         ssh_layout.addWidget(ssh_group)
 
         ssh_btn_layout = QHBoxLayout()
-        self.btn_start_ssh = QPushButton("SSH 启动")
+        self.btn_start_ssh = GlowButton("SSH 启动")
         self.btn_start_ssh.clicked.connect(self._start_ssh)
-        self.btn_stop_ssh = QPushButton("SSH 停止")
+        self.btn_stop_ssh = GlowButton("SSH 停止")
         self.btn_stop_ssh.clicked.connect(self._stop_engine)
         self.btn_stop_ssh.setEnabled(False)
         ssh_btn_layout.addWidget(self.btn_start_ssh)
         ssh_btn_layout.addWidget(self.btn_stop_ssh)
         ssh_layout.addLayout(ssh_btn_layout)
 
-        ssh_fox_group = QGroupBox("野狐客户端监听")
+        ssh_fox_group = HudGroupBox("野狐客户端监听")
         ssh_fox_layout = QHBoxLayout()
         ssh_fox_layout.addWidget(QLabel("端口:"))
-        self.ssh_fox_port_edit = QLineEdit(str(self.cfg.get("fox_listen_port", 6000)))
+        self.ssh_fox_port_edit = GlowLineEdit(str(self.cfg.get("fox_listen_port", 6000)))
         self.ssh_fox_port_edit.setFixedWidth(80)
         ssh_fox_layout.addWidget(self.ssh_fox_port_edit)
-        self.btn_start_fox_ssh = QPushButton("开始监听")
+        self.btn_start_fox_ssh = GlowButton("开始监听")
         self.btn_start_fox_ssh.clicked.connect(self._start_fox_ssh)
-        self.btn_stop_fox_ssh = QPushButton("停止监听")
+        self.btn_stop_fox_ssh = GlowButton("停止监听")
         self.btn_stop_fox_ssh.clicked.connect(self._stop_fox)
         self.btn_stop_fox_ssh.setEnabled(False)
         ssh_fox_layout.addWidget(self.btn_start_fox_ssh)
@@ -342,7 +453,7 @@ class SakuraGTPApp(QMainWindow):
         layout.addWidget(self.mode_stack)
 
         # 落子参数（已合并到 genmove_analyze，始终可见）
-        live_group = QGroupBox("落子参数（genmove_analyze）")
+        live_group = HudGroupBox("落子参数（genmove_analyze）")
         live_layout = QVBoxLayout()
 
         self.winrate_param_widget = QWidget()
@@ -350,16 +461,16 @@ class SakuraGTPApp(QMainWindow):
         param_layout.setVerticalSpacing(10)
         param_layout.setContentsMargins(0, 0, 0, 0)
 
-        self.max_time_edit = QLineEdit(str(self.cfg.get("max_time", 5)))
+        self.max_time_edit = GlowLineEdit(str(self.cfg.get("max_time", 5)))
         param_layout.addRow("maxTime:", self.max_time_edit)
 
-        self.max_visits_edit = QLineEdit(str(self.cfg.get("max_visits", 0)))
+        self.max_visits_edit = GlowLineEdit(str(self.cfg.get("max_visits", 0)))
         param_layout.addRow("maxVisits:", self.max_visits_edit)
 
-        self.max_playouts_edit = QLineEdit(str(self.cfg.get("max_playouts", 0)))
+        self.max_playouts_edit = GlowLineEdit(str(self.cfg.get("max_playouts", 0)))
         param_layout.addRow("maxPlayouts:", self.max_playouts_edit)
 
-        self.btn_refresh_state = QPushButton("刷新落子参数")
+        self.btn_refresh_state = GlowButton("刷新落子参数")
         self.btn_refresh_state.clicked.connect(self._refresh_state)
         param_layout.addRow("", self.btn_refresh_state)
 
@@ -370,11 +481,11 @@ class SakuraGTPApp(QMainWindow):
         layout.addWidget(live_group)
 
         # 规则快速切换
-        rules_group = QGroupBox("规则快速切换")
+        rules_group = HudGroupBox("规则快速切换")
         rules_layout = QHBoxLayout()
-        self.btn_chinese_rules = QPushButton("中国规则")
+        self.btn_chinese_rules = GlowButton("中国规则")
         self.btn_chinese_rules.clicked.connect(lambda: self._send_rule("chinese"))
-        self.btn_japanese_rules = QPushButton("日本规则")
+        self.btn_japanese_rules = GlowButton("日本规则")
         self.btn_japanese_rules.clicked.connect(lambda: self._send_rule("japanese"))
         rules_layout.addWidget(self.btn_chinese_rules)
         rules_layout.addWidget(self.btn_japanese_rules)
@@ -382,27 +493,27 @@ class SakuraGTPApp(QMainWindow):
         layout.addWidget(rules_group)
 
         # GTP Shell
-        shell_group = QGroupBox("GTP Shell")
+        shell_group = HudGroupBox("GTP Shell")
         shell_layout = QVBoxLayout()
 
         snippet_row = QHBoxLayout()
         snippet_row.addWidget(QLabel("常用指令:"))
-        self.snippet_combo = QComboBox()
+        self.snippet_combo = GlowComboBox()
         self.snippet_combo.addItem("（无）")
         for s in self.cfg.get("gtp_snippets", []):
             self.snippet_combo.addItem(s)
         self.snippet_combo.currentTextChanged.connect(self._on_snippet_selected)
         snippet_row.addWidget(self.snippet_combo, stretch=1)
-        btn_manage_snippets = QPushButton("管理")
+        btn_manage_snippets = GlowButton("管理")
         btn_manage_snippets.clicked.connect(self._manage_snippets)
         snippet_row.addWidget(btn_manage_snippets)
         shell_layout.addLayout(snippet_row)
 
-        self.shell_edit = QLineEdit()
+        self.shell_edit = GlowLineEdit()
         self.shell_edit.returnPressed.connect(self._send_shell)
         shell_layout.addWidget(self.shell_edit)
 
-        btn_send_shell = QPushButton("发送 GTP 命令")
+        btn_send_shell = GlowButton("发送 GTP 命令")
         btn_send_shell.clicked.connect(self._send_shell)
         shell_layout.addWidget(btn_send_shell)
 
@@ -410,11 +521,11 @@ class SakuraGTPApp(QMainWindow):
         layout.addWidget(shell_group)
 
         # 跑谱状态
-        self.contribute_group = QGroupBox("跑谱状态")
+        self.contribute_group = HudGroupBox("跑谱状态")
         contrib_layout = QHBoxLayout()
         self.contribute_label = QLabel("未运行")
         contrib_layout.addWidget(self.contribute_label)
-        self.btn_stop_contribute = QPushButton("停止跑谱")
+        self.btn_stop_contribute = GlowButton("停止跑谱")
         self.btn_stop_contribute.setEnabled(False)
         self.btn_stop_contribute.clicked.connect(self._manual_stop_contribute)
         contrib_layout.addWidget(self.btn_stop_contribute)
@@ -424,10 +535,8 @@ class SakuraGTPApp(QMainWindow):
 
         layout.addStretch()
 
-        layout.addStretch()
-
     def _build_right(self, main_layout, left_scroll):
-        self.tabs = QTabWidget()
+        self.tabs = SciFiTabWidget()
 
         comm_tab = QWidget()
         comm_layout = QVBoxLayout(comm_tab)
@@ -436,7 +545,7 @@ class SakuraGTPApp(QMainWindow):
 
         comm_ctrl = QHBoxLayout()
         comm_ctrl.addStretch()
-        btn_clear_comm = QPushButton("清空")
+        btn_clear_comm = GlowButton("清空")
         btn_clear_comm.clicked.connect(self._clear_comm)
         comm_ctrl.addWidget(btn_clear_comm)
         comm_layout.addLayout(comm_ctrl)
@@ -454,7 +563,7 @@ class SakuraGTPApp(QMainWindow):
 
         gtp_ctrl = QHBoxLayout()
         gtp_ctrl.addStretch()
-        btn_clear_gtp = QPushButton("清空")
+        btn_clear_gtp = GlowButton("清空")
         btn_clear_gtp.clicked.connect(self._clear_gtp)
         gtp_ctrl.addWidget(btn_clear_gtp)
         gtp_layout.addLayout(gtp_ctrl)
@@ -471,7 +580,7 @@ class SakuraGTPApp(QMainWindow):
         board_layout.setSpacing(4)
 
         ctrl = QHBoxLayout()
-        self.show_cand_check = QCheckBox("显示选点")
+        self.show_cand_check = GlowCheckBox("显示选点")
         self.show_cand_check.setChecked(True)
         self.show_cand_check.stateChanged.connect(self._on_show_cand_change)
         ctrl.addWidget(self.show_cand_check)
@@ -490,15 +599,15 @@ class SakuraGTPApp(QMainWindow):
         winrate_layout.setSpacing(4)
 
         wr_ctrl = QHBoxLayout()
-        btn_clear_wr = QPushButton("清空曲线")
+        btn_clear_wr = GlowButton("清空曲线")
         btn_clear_wr.clicked.connect(self._clear_winrate_curve)
         wr_ctrl.addWidget(btn_clear_wr)
 
-        btn_export_wr = QPushButton("导出图片")
+        btn_export_wr = GlowButton("导出图片")
         btn_export_wr.clicked.connect(self._export_winrate_image)
         wr_ctrl.addWidget(btn_export_wr)
 
-        btn_detach_wr = QPushButton("独立窗口")
+        btn_detach_wr = GlowButton("独立窗口")
         btn_detach_wr.clicked.connect(self._detach_winrate)
         wr_ctrl.addWidget(btn_detach_wr)
 
@@ -511,7 +620,7 @@ class SakuraGTPApp(QMainWindow):
         self.tabs.addTab(winrate_tab, "胜率曲线")
 
         main_layout.addWidget(left_scroll, stretch=1)
-        main_layout.addWidget(self.tabs, stretch=1)
+        main_layout.addWidget(self.tabs, stretch=2)
 
     def _connect_signals(self):
         self.comm_signal.connect(self._append_comm)
@@ -520,6 +629,7 @@ class SakuraGTPApp(QMainWindow):
         self.board_signal.connect(self._do_update_board)
         self.engine_exit_signal.connect(self._stop_engine)
 
+    # ============================================================ 模式切换 / 浏览
     def _switch_mode(self, mode):
         self.cfg["engine_mode"] = mode
         save_config(self.cfg)
@@ -597,6 +707,7 @@ class SakuraGTPApp(QMainWindow):
 
         return True, ""
 
+    # ============================================================ 引擎控制
     def _start_engine(self):
         engine_path = self.engine_combo.currentText().strip()
         weight_path = self.weight_combo.currentText().strip()
@@ -703,7 +814,7 @@ class SakuraGTPApp(QMainWindow):
         self.btn_start_ssh.setEnabled(True)
         self.btn_stop_ssh.setEnabled(False)
 
-        if self.fox.is_connected() if hasattr(self.fox, "is_connected") else False:
+        if self.fox.is_connected():
             self.btn_start_fox_local.setEnabled(False)
             self.btn_stop_fox_local.setEnabled(True)
             self.btn_start_fox_ssh.setEnabled(False)
@@ -728,7 +839,7 @@ class SakuraGTPApp(QMainWindow):
     def _on_engine_exit_signal(self):
         self.engine_exit_signal.emit()
 
-    # ---------- 自动跑谱 ----------
+    # ============================================================ 自动跑谱
     def _idle_loop(self):
         while True:
             time.sleep(10)
@@ -790,6 +901,7 @@ class SakuraGTPApp(QMainWindow):
         save_config(self.cfg)
         self._log_comm("已手动停止跑谱，并关闭自动跑谱")
 
+    # ============================================================ 野狐监听
     def _port_in_use(self, port):
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
@@ -873,6 +985,7 @@ class SakuraGTPApp(QMainWindow):
             self.btn_mode_local.setEnabled(True)
             self.btn_mode_ssh.setEnabled(True)
 
+    # ============================================================ 规则 / 对局事件
     def _send_rule(self, rule):
         if not self.engine.is_running():
             self._log_gtp("引擎未运行，无法切换规则")
@@ -901,6 +1014,7 @@ class SakuraGTPApp(QMainWindow):
         if self.winrate_window is not None and self._detached_view is not None:
             self._detached_view.clear()
 
+    # ============================================================ 引擎输出 / 胜率
     def _on_engine_output(self, line):
         self.bridge.on_engine_output(line)
         self._update_winrate_curve(line)
@@ -961,6 +1075,7 @@ class SakuraGTPApp(QMainWindow):
         self._apply_engine_params()
         self._log_comm("参数已刷新")
 
+    # ============================================================ 棋盘
     def _do_update_board(self):
         board = {}
         played = []
@@ -1031,6 +1146,7 @@ class SakuraGTPApp(QMainWindow):
     def _on_show_cand_change(self, state):
         self.board_view.set_show_candidates(bool(state))
 
+    # ============================================================ 胜率曲线
     def _clear_winrate_curve(self):
         self.winrate_view.clear()
         if self.winrate_window is not None and self._detached_view is not None:
@@ -1064,7 +1180,7 @@ class SakuraGTPApp(QMainWindow):
         layout = QVBoxLayout(dlg)
         layout.setContentsMargins(4, 4, 4, 4)
 
-        chk_top = QCheckBox("总在最前")
+        chk_top = GlowCheckBox("总在最前")
         chk_top.setChecked(False)
         chk_top.stateChanged.connect(
             lambda state: self._set_winrate_always_on_top(dlg, bool(state))
@@ -1082,9 +1198,6 @@ class SakuraGTPApp(QMainWindow):
 
         if self.winrate_view.stdev is not None:
             view.set_stdev(self.winrate_view.stdev)
-
-        if self.cfg.get("dark_winrate_bg", False):
-            view.set_dark_mode(True)
 
         dlg.setLayout(layout)
         dlg.finished.connect(self._on_winrate_window_closed)
@@ -1104,6 +1217,7 @@ class SakuraGTPApp(QMainWindow):
         self.winrate_window = None
         self._detached_view = None
 
+    # ============================================================ GTP Shell
     def _send_shell(self):
         cmd = self.shell_edit.text().strip()
         if not cmd:
@@ -1131,146 +1245,9 @@ class SakuraGTPApp(QMainWindow):
             self.snippet_combo.addItem(s)
 
     def _manage_snippets(self):
-        dlg = QDialog(self)
-        dlg.setWindowTitle("管理常用 GTP 指令")
-        dlg.resize(600, 400)
+        ui_dialogs.manage_snippets(self)
 
-        layout = QVBoxLayout(dlg)
-        layout.addWidget(QLabel("指令列表（每条一行）:"))
-
-        self._snippet_list = QListWidget()
-        for s in self.cfg.get("gtp_snippets", []):
-            self._snippet_list.addItem(s)
-        layout.addWidget(self._snippet_list, stretch=1)
-
-        edit_row = QHBoxLayout()
-        self._snippet_edit = QLineEdit()
-        self._snippet_edit.setPlaceholderText("输入一条 GTP 命令，例如 kata-set-param maxTime 5")
-        edit_row.addWidget(self._snippet_edit, stretch=1)
-
-        btn_add = QPushButton("添加")
-        btn_add.clicked.connect(self._snippet_add)
-        edit_row.addWidget(btn_add)
-        layout.addLayout(edit_row)
-
-        btn_row = QHBoxLayout()
-        btn_del = QPushButton("删除选中")
-        btn_del.clicked.connect(self._snippet_delete)
-        btn_row.addWidget(btn_del)
-        btn_row.addStretch()
-        btn_close = QPushButton("关闭")
-        btn_close.clicked.connect(dlg.accept)
-        btn_row.addWidget(btn_close)
-        layout.addLayout(btn_row)
-
-        dlg.exec_()
-
-    def _snippet_add(self):
-        text = self._snippet_edit.text().strip()
-        if not text:
-            return
-        snippets = self.cfg.get("gtp_snippets", [])
-        if not isinstance(snippets, list):
-            snippets = []
-        if text not in snippets:
-            snippets.append(text)
-            self.cfg["gtp_snippets"] = snippets
-            save_config(self.cfg)
-            self._snippet_list.addItem(text)
-            self._refresh_snippet_combo()
-        self._snippet_edit.clear()
-
-    def _snippet_delete(self):
-        item = self._snippet_list.currentItem()
-        if not item:
-            return
-        text = item.text()
-        snippets = self.cfg.get("gtp_snippets", [])
-        if not isinstance(snippets, list):
-            snippets = []
-        if text in snippets:
-            snippets.remove(text)
-            self.cfg["gtp_snippets"] = snippets
-            save_config(self.cfg)
-            self._snippet_list.takeItem(self._snippet_list.row(item))
-            self._refresh_snippet_combo()
-
-    # ---------- 视图菜单 ----------
-    def _open_bg_color_dialog(self):
-        dlg = QDialog(self)
-        dlg.setWindowTitle("界面背景色")
-        dlg.resize(400, 150)
-
-        layout = QVBoxLayout(dlg)
-        layout.addWidget(QLabel("拖动色条调整界面背景:"))
-
-        slider = QSlider(Qt.Horizontal)
-        slider.setRange(0, 100)
-        bg_color = self.cfg.get("bg_color", "#F0F0F0")
-        try:
-            c = QColor(bg_color)
-            lum = 0.299 * c.red() + 0.587 * c.green() + 0.114 * c.blue()
-            slider.setValue(max(0, min(100, int(lum * 100 / 255))))
-        except Exception:
-            slider.setValue(20)
-        layout.addWidget(slider)
-
-        preview = QLabel()
-        preview.setFixedSize(60, 30)
-        preview.setStyleSheet(
-            f"background-color: {bg_color}; border: 1px solid #888;"
-        )
-        layout.addWidget(preview)
-
-        def on_change(value):
-            colors = [
-                (40, 40, 40),
-                (100, 100, 100),
-                (235, 235, 235),
-                (232, 196, 138),
-                (200, 220, 240),
-                (200, 235, 200),
-                (230, 210, 240),
-            ]
-            n = len(colors) - 1
-            idx = value * n / 100
-            i = int(idx)
-            if i >= n:
-                i = n - 1
-            t = idx - i
-            r = int(colors[i][0] * (1 - t) + colors[i + 1][0] * t)
-            g = int(colors[i][1] * (1 - t) + colors[i + 1][1] * t)
-            b = int(colors[i][2] * (1 - t) + colors[i + 1][2] * t)
-            color = QColor(r, g, b)
-            preview.setStyleSheet(
-                f"background-color: {color.name()}; border: 1px solid #888;"
-            )
-            self._apply_bg_color(color.name())
-
-        slider.valueChanged.connect(on_change)
-
-        btn_close = QPushButton("关闭")
-        btn_close.clicked.connect(dlg.accept)
-        layout.addWidget(btn_close)
-
-        dlg.exec_()
-
-    def _toggle_dark_winrate(self):
-        current = self.cfg.get("dark_winrate_bg", False)
-        new = not current
-        self.cfg["dark_winrate_bg"] = new
-        save_config(self.cfg)
-        self.winrate_view.set_dark_mode(new)
-        if self.winrate_window is not None and self._detached_view is not None:
-            self._detached_view.set_dark_mode(new)
-
-    def _toggle_dark_board(self):
-        current = self.cfg.get("dark_board_bg", False)
-        new = not current
-        self.cfg["dark_board_bg"] = new
-        save_config(self.cfg)
-        self.board_view.set_dark_mode(new)
-
+    # ============================================================ 主题
     def _apply_bg_color(self, color_hex):
         try:
             c = QColor(color_hex)
@@ -1279,191 +1256,35 @@ class SakuraGTPApp(QMainWindow):
         except Exception:
             return
 
-        r, g, b = c.red(), c.green(), c.blue()
-        luminance = 0.299 * r + 0.587 * g + 0.114 * b
-        if luminance > 128:
-            text_color = "#222222"
-            placeholder_color = "#888888"
-            border_color = "#CCCCCC"
-            btn_bg = "#E8E8E8"
-            btn_hover = "#D8D8D8"
-            btn_pressed = "#C0C0C0"
-            btn_disabled_bg = "#D0D0D0"
-            btn_disabled_fg = "#A0A0A0"
-            btn_disabled_border = "#D0D0D0"
-        else:
-            text_color = "#EEEEEE"
-            placeholder_color = "#AAAAAA"
-            border_color = "#555555"
-            btn_bg = "#4A4A4A"
-            btn_hover = "#5A5A5A"
-            btn_pressed = "#3A3A3A"
-            btn_disabled_bg = "#3A3A3A"
-            btn_disabled_fg = "#666666"
-            btn_disabled_border = "#3A3A3A"
-
-        self.setStyleSheet(
-            f"QMainWindow {{ background-color: {color_hex}; }}"
-            f"QWidget {{ background-color: {color_hex}; color: {text_color}; }}"
-            f"QScrollArea {{ background-color: {color_hex}; border: none; }}"
-            f"QScrollArea > QWidget > QWidget {{ background-color: {color_hex}; }}"
-            f"QScrollArea > QWidget > QScrollBar {{ background-color: {color_hex}; }}"
-            f"QLabel {{ color: {text_color}; background: transparent; }}"
-            f"QGroupBox {{ color: {text_color}; border: 1px solid {border_color}; "
-            f"  margin-top: 8px; padding-top: 8px; border-radius: 4px; }}"
-            f"QGroupBox::title {{ color: {text_color}; subcontrol-origin: margin; "
-            f"  left: 8px; padding: 0 4px; }}"
-            f"QCheckBox {{ color: {text_color}; background: transparent; }}"
-            f"QComboBox {{ min-height: 34px; padding: 4px 8px; "
-            f"  background-color: {btn_bg}; color: {text_color}; "
-            f"  border: 1px solid {border_color}; border-radius: 4px; }}"
-            f"QComboBox:hover {{ background-color: {btn_hover}; }}"
-            f"QComboBox:disabled {{ background-color: {btn_disabled_bg}; "
-            f"  color: {btn_disabled_fg}; border: 1px solid {btn_disabled_border}; }}"
-            f"QLineEdit {{ min-height: 34px; padding: 4px 8px; "
-            f"  background-color: {btn_bg}; color: {text_color}; "
-            f"  border: 1px solid {border_color}; border-radius: 4px; }}"
-            f"QLineEdit:disabled {{ background-color: {btn_disabled_bg}; "
-            f"  color: {btn_disabled_fg}; border: 1px solid {btn_disabled_border}; }}"
-            f"QPushButton {{ min-height: 30px; padding: 4px 12px; "
-            f"  background-color: {btn_bg}; color: {text_color}; "
-            f"  border: 1px solid {border_color}; border-radius: 4px; }}"
-            f"QPushButton:hover {{ background-color: {btn_hover}; }}"
-            f"QPushButton:pressed {{ background-color: {btn_pressed}; }}"
-            f"QPushButton:disabled {{ background-color: {btn_disabled_bg}; "
-            f"  color: {btn_disabled_fg}; "
-            f"  border: 1px solid {btn_disabled_border}; }}"
-            f"QTabWidget::pane {{ border: 1px solid {border_color}; }}"
-            f"QTabBar::tab {{ background: {border_color}; color: {text_color}; "
-            f"  padding: 6px 12px; }}"
-            f"QTabBar::tab:selected {{ background: {color_hex}; }}"
-        )
+        self.setStyleSheet(build_app_stylesheet(color_hex))
+        set_active_palette(color_hex)
 
         palette = self.palette()
-        palette.setColor(QPalette.PlaceholderText, QColor(placeholder_color))
+        palette.setColor(QPalette.PlaceholderText, QColor(placeholder_color(color_hex)))
         self.setPalette(palette)
+
+        # 深色 -> 星图闪烁；浅色 -> 柔和渐变
+        self._dark_ui = is_dark(color_hex)
+        if self._dark_ui:
+            self._twinkle_timer.start()
+        else:
+            self._twinkle_timer.stop()
+        self.update()
 
         self.cfg["bg_color"] = color_hex
         save_config(self.cfg)
 
-    # ---------- 心跳 / 重连 / Token 对话框 ----------
+    # ============================================================ 工具菜单对话框
     def _open_heartbeat_dialog(self):
-        dlg = QDialog(self)
-        dlg.setWindowTitle("心跳设置")
-        dlg.resize(400, 200)
-
-        layout = QFormLayout(dlg)
-
-        chk = QCheckBox("启用心跳检测")
-        chk.setChecked(self.cfg.get("heartbeat_enabled", False))
-        layout.addRow("", chk)
-
-        interval_edit = QLineEdit(str(self.cfg.get("heartbeat_interval", 30)))
-        layout.addRow("心跳间隔（秒）:", interval_edit)
-
-        timeout_edit = QLineEdit(str(self.cfg.get("heartbeat_timeout", 10)))
-        layout.addRow("超时判定（秒）:", timeout_edit)
-
-        def on_save():
-            self.cfg["heartbeat_enabled"] = chk.isChecked()
-            try:
-                self.cfg["heartbeat_interval"] = int(interval_edit.text())
-            except ValueError:
-                self.cfg["heartbeat_interval"] = 30
-            try:
-                self.cfg["heartbeat_timeout"] = int(timeout_edit.text())
-            except ValueError:
-                self.cfg["heartbeat_timeout"] = 10
-            save_config(self.cfg)
-            self.engine.set_heartbeat(
-                self.cfg["heartbeat_enabled"],
-                self.cfg["heartbeat_interval"],
-                self.cfg["heartbeat_timeout"],
-            )
-            self._log_comm("心跳设置已保存")
-            dlg.accept()
-
-        btn = QPushButton("保存")
-        btn.clicked.connect(on_save)
-        layout.addRow("", btn)
-
-        dlg.exec_()
+        ui_dialogs.open_heartbeat_dialog(self)
 
     def _open_reconnect_dialog(self):
-        dlg = QDialog(self)
-        dlg.setWindowTitle("断线重连设置")
-        dlg.resize(400, 200)
-
-        layout = QFormLayout(dlg)
-
-        chk = QCheckBox("启用自动重连")
-        chk.setChecked(self.cfg.get("auto_reconnect", True))
-        layout.addRow("", chk)
-
-        interval_edit = QLineEdit(str(self.cfg.get("reconnect_interval", 5)))
-        layout.addRow("重连间隔（秒）:", interval_edit)
-
-        def on_save():
-            self.cfg["auto_reconnect"] = chk.isChecked()
-            try:
-                self.cfg["reconnect_interval"] = int(interval_edit.text())
-            except ValueError:
-                self.cfg["reconnect_interval"] = 5
-            save_config(self.cfg)
-            self.fox.set_auto_reconnect(
-                self.cfg["auto_reconnect"],
-                self.cfg["reconnect_interval"],
-            )
-            self._log_comm("断线重连设置已保存")
-            dlg.accept()
-
-        btn = QPushButton("保存")
-        btn.clicked.connect(on_save)
-        layout.addRow("", btn)
-
-        dlg.exec_()
+        ui_dialogs.open_reconnect_dialog(self)
 
     def _open_token_dialog(self):
-        dlg = QDialog(self)
-        dlg.setWindowTitle("API Token 设置")
-        dlg.resize(500, 200)
+        ui_dialogs.open_token_dialog(self)
 
-        layout = QFormLayout(dlg)
-
-        chk = QCheckBox("启用 Token 认证")
-        chk.setChecked(self.cfg.get("api_token_enabled", False))
-        layout.addRow("", chk)
-
-        token_edit = QLineEdit(self.cfg.get("api_token", ""))
-        token_edit.setPlaceholderText("留空则自动生成")
-        layout.addRow("Token:", token_edit)
-
-        def on_generate():
-            token_edit.setText("sakura_" + secrets.token_hex(16))
-
-        btn_gen = QPushButton("自动生成")
-        btn_gen.clicked.connect(on_generate)
-        layout.addRow("", btn_gen)
-
-        def on_save():
-            self.cfg["api_token_enabled"] = chk.isChecked()
-            token = token_edit.text().strip()
-            if not token and self.cfg["api_token_enabled"]:
-                token = "sakura_" + secrets.token_hex(16)
-                token_edit.setText(token)
-            self.cfg["api_token"] = token
-            save_config(self.cfg)
-            self.api_server.set_token(self.cfg["api_token_enabled"], token)
-            QMessageBox.information(dlg, "Token", f"当前 Token:\n{token}")
-            dlg.accept()
-
-        btn = QPushButton("保存")
-        btn.clicked.connect(on_save)
-        layout.addRow("", btn)
-
-        dlg.exec_()
-
-    # ---------- HTTP API ----------
+    # ============================================================ HTTP API
     def _open_api_window(self):
         if self.api_window is not None:
             self.api_window.show()
@@ -1485,12 +1306,12 @@ class SakuraGTPApp(QMainWindow):
 
         ctrl = QHBoxLayout()
         ctrl.addWidget(QLabel("端口:"))
-        api_port_edit = QLineEdit(str(self.cfg.get("api_port", 8765)))
+        api_port_edit = GlowLineEdit(str(self.cfg.get("api_port", 8765)))
         api_port_edit.setFixedWidth(80)
         ctrl.addWidget(api_port_edit)
 
-        btn_start = QPushButton("启动 API")
-        btn_stop = QPushButton("停止 API")
+        btn_start = GlowButton("启动 API")
+        btn_stop = GlowButton("停止 API")
         ctrl.addWidget(btn_start)
         ctrl.addWidget(btn_stop)
         ctrl.addStretch()
@@ -1551,61 +1372,12 @@ class SakuraGTPApp(QMainWindow):
         dlg.show()
 
     def _open_contribute_dialog(self):
-        dlg = QDialog(self)
-        dlg.setWindowTitle("自动跑谱设置")
-        dlg.resize(600, 300)
-
-        layout = QFormLayout(dlg)
-
-        chk = QCheckBox("启用自动跑谱")
-        chk.setChecked(self.cfg.get("auto_contribute", False))
-        layout.addRow("", chk)
-
-        cmd_edit = QLineEdit(self.cfg.get("contribute_command", ""))
-        cmd_edit.setPlaceholderText(
-            'katago.exe contribute -config contribute_example.cfg'
-        )
-        layout.addRow("跑谱命令:", cmd_edit)
-
-        idle_edit = QLineEdit(str(self.cfg.get("contribute_idle_seconds", 300)))
-        layout.addRow("空闲多少秒后启动:", idle_edit)
-
-        stop_chk = QCheckBox("有对局立刻停止跑谱")
-        stop_chk.setChecked(self.cfg.get("contribute_stop_on_game", True))
-        layout.addRow("", stop_chk)
-
-        hint = QLabel(
-            "提示：\n"
-            "1. 跑谱命令需要用户自备能跑谱的 KataGo 引擎和 contribute 配置文件。\n"
-            "2. 示例：katago.exe contribute -config contribute_example.cfg\n"
-            "3. contribute 配置里需要填 username、password。\n"
-            "4. 跑谱进程独立于对弈引擎，不冲突。"
-        )
-        hint.setWordWrap(True)
-        layout.addRow("", hint)
-
-        def on_save():
-            self.cfg["auto_contribute"] = chk.isChecked()
-            self.cfg["contribute_command"] = cmd_edit.text().strip()
-            try:
-                self.cfg["contribute_idle_seconds"] = int(idle_edit.text())
-            except ValueError:
-                self.cfg["contribute_idle_seconds"] = 300
-            self.cfg["contribute_stop_on_game"] = stop_chk.isChecked()
-            save_config(self.cfg)
-            self._log_comm("自动跑谱设置已保存")
-            dlg.accept()
-
-        btn = QPushButton("保存")
-        btn.clicked.connect(on_save)
-        layout.addRow("", btn)
-
-        dlg.exec_()
+        ui_dialogs.open_contribute_dialog(self)
 
     def _on_api_window_closed(self):
         self.api_window = None
 
-    # ---------- 配置 ----------
+    # ============================================================ 配置
     def _collect_cfg(self):
         self.cfg["engine_path"] = self.engine_combo.currentText()
         self.cfg["weight_path"] = self.weight_combo.currentText()
@@ -1644,7 +1416,6 @@ class SakuraGTPApp(QMainWindow):
         返回 dict，包含 max_time / max_visits / max_playouts 三个 key：
         - 参数未出现或出现但被 # 注释：值设为 0
         - 参数存在且未注释：值为配置文件里的数值（字符串）
-        同时返回 raw 记录，便于调试。
         """
         result = {
             "max_time": "0",
@@ -1700,11 +1471,11 @@ class SakuraGTPApp(QMainWindow):
             return m.group(2)
         return m.group(3) or ""
 
-    # ---------- API 回调 ----------
+    # ============================================================ API 回调
     def _api_status(self):
         return {
             "engine_running": self.engine.is_running(),
-            "fox_listening": self.fox.is_connected() if hasattr(self.fox, "is_connected") else False,
+            "fox_listening": self.fox.is_connected(),
             "api_running": self.api_server.is_running() if self.api_server else False,
             "ai_color": self.bridge.ai_color,
             "board_size": self.bridge.board_size,
@@ -1801,7 +1572,7 @@ class SakuraGTPApp(QMainWindow):
     def _api_set_rules(self, rule):
         self.bridge.set_rules(rule)
 
-    # ---------- 日志 ----------
+    # ============================================================ 日志
     def _log_comm(self, msg):
         self.comm_signal.emit(msg)
 
@@ -1820,6 +1591,7 @@ class SakuraGTPApp(QMainWindow):
     def _clear_gtp(self):
         self.gtp_text.clear()
 
+    # ============================================================ 帮助
     def _show_env_help(self):
         QMessageBox.information(
             self, "依赖环境",
@@ -1854,6 +1626,7 @@ class SakuraGTPApp(QMainWindow):
             "SakuraGTP 1.5.0\n野狐围棋 AI 连线器"
         )
 
+    # ============================================================ 关闭
     def closeEvent(self, event):
         if self.engine.is_running():
             ret = QMessageBox.question(

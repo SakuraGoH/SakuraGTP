@@ -336,7 +336,7 @@ class GTPBridge:
         if m:
             resp_id = int(m.group(1))
             body = m.group(2)
-            purpose = self._id_purpose.get(resp_id, "")
+            purpose = self._id_purpose.pop(resp_id, "")
             self.log(f"GTP响应(交错): id={resp_id}, purpose={purpose}, body={body!r}")
             if purpose in ("genmove", "genmove_analyze"):
                 self._id_purpose.pop(resp_id, None)
@@ -399,7 +399,8 @@ class GTPBridge:
                 resp_id = None
             body = parts[1].strip() if len(parts) > 1 else ""
 
-        purpose = self._id_purpose.get(resp_id, "") if resp_id else ""
+        purpose = self._id_purpose.pop(resp_id, None) if resp_id else None
+        purpose = purpose or ""
         self.log(f"GTP响应: id={resp_id}, purpose={purpose}, body={body!r}")
 
         if purpose in ("genmove", "genmove_analyze"):
