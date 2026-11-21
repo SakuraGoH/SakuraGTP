@@ -34,7 +34,10 @@ SakuraGTP no longer assumes KataGo:
 | Leela Zero / GNU Go / Fuego / Pachi / others | core GTP only: `boardsize`, `komi`, `time_settings`, `time_left`, `play`, `genmove`, `final_score` |
 | No `final_score` | Fox's `$AFSCORE` is answered with `error`, as the Fox protocol allows |
 
-Read [`docs/FoxGTP逆向分析与兼容性改造.md`](docs/FoxGTP逆向分析与兼容性改造.md) for the reverse-engineering notes on the official FoxGTP connector (which GTP commands it uses, how it re-syncs, how it translates byo-yomi) and what was changed here.
+A from-scratch Python re-implementation of the official FoxGTP connector is available on the
+[`foxgtp-py`](https://github.com/SakuraGoH/SakuraGTP/tree/foxgtp-py) branch: same protocol
+behaviour (core GTP commands only, move-list re-sync, byo-yomi translation), plus support for
+arbitrary GTP commands, a modern UI and a single-file executable.
 
 Two useful config keys for byo-yomi translation (in `sakura_config.json`, matching FoxGTP's options):
 
