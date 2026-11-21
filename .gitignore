@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Local build artifacts
+build/
+dist/
+*.spec
+
+# Local runtime config (contains machine-specific paths)
+sakura_config.json
+
+# Reverse-engineering workspaces (regenerate with the scripts in _re/)
+_re/pdf/
+_re/listing.txt
+_re/*.txt
+_re/kgtest/

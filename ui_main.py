@@ -750,6 +750,9 @@ class SakuraGTPApp(QMainWindow):
 
         self._apply_engine_params()
 
+        # 引擎起来了：清会话 + 后台探测方言（list_commands / kata-* / 是否回显 id）
+        self.bridge.on_engine_started(engine_path or comm_cmd)
+
         if engine_path:
             push_history(self.cfg, "engine_history", engine_path)
         if weight_path:
@@ -797,6 +800,8 @@ class SakuraGTPApp(QMainWindow):
             self._stop_engine()
             return
 
+        self.bridge.on_engine_started(command)
+
         self.btn_start_ssh.setEnabled(False)
         self.btn_stop_ssh.setEnabled(True)
         self.btn_start_engine.setEnabled(False)
@@ -807,6 +812,7 @@ class SakuraGTPApp(QMainWindow):
     def _stop_engine(self):
         if self.engine.is_running():
             self._log_comm("发送 GTP: quit")
+        self.bridge.on_engine_stopped()
         self.engine.stop()
         self._log_comm("引擎已停止")
         self.btn_start_engine.setEnabled(True)
@@ -1069,6 +1075,17 @@ class SakuraGTPApp(QMainWindow):
         try:
             self.bridge.set_max_playouts(int(self.max_playouts_edit.text()))
         except ValueError:
+            pass
+        # 读秒口径（对应 FoxGTP 手册 4.4.1 / 4.4.2 的三组选项）
+        try:
+            self.bridge.set_time_options(
+                use_go_byoyomi=self.cfg.get("use_common_byo_yomi", False),
+                use_data_transfer_time=bool(self.cfg.get("data_transfer_time", 0)),
+                data_transfer_time=int(self.cfg.get("data_transfer_time", 1)),
+                specify_ai_byoyomi=self.cfg.get("specify_ai_byoyomi", False),
+                ai_byoyomi_time=int(self.cfg.get("ai_byo_yomi_time", 5)),
+            )
+        except Exception:
             pass
 
     def _refresh_state(self):
@@ -1544,6 +1561,21 @@ class SakuraGTPApp(QMainWindow):
             "config": self.config_combo.currentText(),
             "comm_cmd": self.comm_cmd_edit.text(),
             "ssh_host": self.ssh_host_edit.text(),
+            # 方言探测结果，方便外部排查「为什么某条命令没发」
+            "dialect": {
+                "name": self.bridge.profile.name,
+                "version": self.bridge.profile.version,
+                "family": self.bridge.profile.family,
+                "echoes_id": self.bridge.profile.echoes_id,
+                "list_commands_ok": self.bridge.profile.list_ok,
+                "kata": self.bridge.profile.kata,
+                "kata_analyze": self.bridge.profile.kata_analyze,
+                "undo": self.bridge.profile.undo,
+                "final_score": self.bridge.profile.final_score,
+                "set_free_handicap": self.bridge.profile.set_free_handicap,
+                "time_settings": self.bridge.profile.time_settings,
+                "summary": self.bridge.profile.summary(),
+            },
         }
 
     def _api_send_gtp(self, cmd):

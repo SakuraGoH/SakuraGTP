@@ -8,7 +8,9 @@ Since there was already an internal test version previously, the first release s
 
 ## Features
 
-- **Local engine support**: KataGo, LeelaZero, and any GTP-compatible engine.However, in terms of compatibility, KataGo is much better than any others engines.
+- **Local engine support**: KataGo, LeelaZero, and any GTP-compatible engine.
+- **Engine dialect auto-detection**: on start, SakuraGTP probes the engine (`protocol_version`, `name`, `list_commands`) and only sends commands the engine actually supports — `kata-*` for KataGo, plain `genmove`/`time_settings` for everyone else, and a graceful fallback if a command is rejected. Engines that do not echo GTP command ids are supported too.
+- **Robust re-sync**: the Fox move list is the source of truth; after a reconnect, an engine restart or a move-number mismatch, SakuraGTP rebuilds the position with `clear_board` + full replay instead of relying on `undo`.
 - **Remote engine support**: Built-in SSH client (no external `plink` needed), or custom command line (plink, ikatago, etc.).
 - **Real-time board**: Live candidate moves with winrate, score lead, and visit counts.
 - **Winrate curve**: Real-time winrate and score lead curves, exportable as PNG.
@@ -19,6 +21,25 @@ Since there was already an internal test version previously, the first release s
 - **Heartbeat**: Optional engine heartbeat to detect unresponsive engines.
 - **API Token**: Optional token authentication for the HTTP API.
 - **Cross-platform**: Runs on Windows 10/11 (64-bit).
+
+---
+
+## Engine compatibility
+
+SakuraGTP no longer assumes KataGo:
+
+| Engine | What is sent |
+|---|---|
+| KataGo | `kata-genmove_analyze`, `kata-set-param`, `kata-set-rules`, `final_score` (candidates + winrate kept) |
+| Leela Zero / GNU Go / Fuego / Pachi / others | core GTP only: `boardsize`, `komi`, `time_settings`, `time_left`, `play`, `genmove`, `final_score` |
+| No `final_score` | Fox's `$AFSCORE` is answered with `error`, as the Fox protocol allows |
+
+Read [`docs/FoxGTP逆向分析与兼容性改造.md`](docs/FoxGTP逆向分析与兼容性改造.md) for the reverse-engineering notes on the official FoxGTP connector (which GTP commands it uses, how it re-syncs, how it translates byo-yomi) and what was changed here.
+
+Two useful config keys for byo-yomi translation (in `sakura_config.json`, matching FoxGTP's options):
+
+- `use_common_byo_yomi`: `true` = "N seconds × M periods" (Go convention); `false` = converted to Canadian byo-yomi (1 stone per period).
+- `data_transfer_time`: if > 0, seconds are subtracted from the engine's byo-yomi so network latency doesn't make the Fox client time out.
 
 ---
 

@@ -252,7 +252,7 @@ SakuraGTP 提供本地 HTTP API，让用户无需修改源码即可二次开发�
 
 ### 8. `GET /engine`
 
-返回引擎信息。
+返回引擎信息，以及方言探测结果（`dialect`）。
 
 **响应示例**：
 
@@ -263,7 +263,21 @@ SakuraGTP 提供本地 HTTP API，让用户无需修改源码即可二次开发�
   "path": "C:\\KataGo\\katago.exe",
   "weight": "C:\\KataGo\\model.bin.gz",
   "config": "C:\\KataGo\\gtp.cfg",
-  "remote_cmd": ""
+  "remote_cmd": "",
+  "dialect": {
+    "name": "KataGo",
+    "version": "1.13.0",
+    "family": "katago",
+    "echoes_id": true,
+    "list_commands_ok": true,
+    "kata": true,
+    "kata_analyze": true,
+    "undo": true,
+    "final_score": true,
+    "set_free_handicap": true,
+    "time_settings": true,
+    "summary": "KataGo 1.13.0(katago) [kata,kata-analyze,undo,final_score,free-handicap,time,id回显]"
+  }
 }
 ```
 
