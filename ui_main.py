@@ -1094,6 +1094,10 @@ class SakuraGTPApp(QMainWindow):
         self.lbl_gtp_hidden.setText("已隐藏 %d 行" % self._gtp_hidden_lines)
 
     def _on_candidate(self, candidates):
+        # 只有 AI 思考中才允许在棋盘上画候选点。
+        # 对手回合 / 落子完成后即使收到残余数据也一律丢弃。
+        if candidates and not getattr(self.bridge, "_analyzing", False):
+            candidates = []
         self.board_view.set_candidates(candidates)
 
     def _update_winrate_curve(self, line):

@@ -2,7 +2,7 @@ from PyQt5.QtWidgets import QWidget, QSizePolicy
 from PyQt5.QtGui import (
     QPainter, QColor, QPen, QBrush, QFont, QPixmap, QRadialGradient,
 )
-from PyQt5.QtCore import Qt, QPointF
+from PyQt5.QtCore import Qt, QPointF, QRectF
 
 
 class BoardView(QWidget):
@@ -128,15 +128,22 @@ class BoardView(QWidget):
                                    self.label_color.blue(), label_a)))
         letters = "ABCDEFGHJKLMNOPQRST"
 
-        top_y = self.margin // 2 + font_size // 2
+        # 坐标数字/字母要避开边缘棋子：右对齐到「最左列棋子外缘 - 空隙」的位置，
+        # 否则边线落子（A 列、19 路）会压住数字。
+        stone_r = max(2, self.cell // 2 - 3)
+        label_gap = max(3, self.cell // 6)
+        label_edge = max(font_size + 4, self.margin - stone_r - label_gap)
+
         for i in range(self.size):
             x = m + i * self.cell
-            painter.drawText(x - font_size // 2, top_y, letters[i])
+            painter.drawText(QRectF(x - self.cell / 2.0, 0, self.cell, label_edge),
+                             Qt.AlignHCenter | Qt.AlignBottom, letters[i])
 
         for i in range(self.size):
             y = m + i * self.cell
             num = str(self.size - i)
-            painter.drawText(self.margin // 2 - font_size // 2, y + font_size // 3, num)
+            painter.drawText(QRectF(0, y - font_size, label_edge, font_size * 2),
+                             Qt.AlignRight | Qt.AlignVCenter, num)
 
         painter.end()
         return pm

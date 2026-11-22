@@ -53,7 +53,7 @@ class FoxSink:
         return [items for cmd, items in self.packets if cmd == command]
 
 
-def make_bridge(mode="katago", **kwargs):
+def make_bridge(mode="katago", candidate_sink=None, **kwargs):
     mock = MockEngine(mode=mode)
     for key, value in kwargs.items():
         setattr(mock, key, value)
@@ -64,7 +64,8 @@ def make_bridge(mode="katago", **kwargs):
         engine_manager=mgr,
         send_to_fox=sink.send,
         on_log=logs.append,
-        on_candidate=lambda c: None,
+        on_candidate=(candidate_sink.append if candidate_sink is not None
+                      else (lambda c: None)),
         on_engine_raw=lambda line: None,
     )
     mgr.on_output = bridge.on_engine_output
@@ -167,6 +168,25 @@ class BridgeTest(unittest.TestCase):
         self.assertIsNotNone(played, "应给野狐回 AFPLAY")
         self.assertEqual(played[0], "B")
         self.assertEqual(played[1], "2^15^3^B")
+
+    def test_candidates_cleared_when_opponent_to_move(self):
+        """对手回合不能在棋盘上留下 AI 的候选点。"""
+        seen = []
+        bridge, _mgr, _sink, _logs = make_bridge("katago", candidate_sink=seen)
+        self.bridge = bridge
+
+        bridge.handle_fox_command("FARULE", ["19", "60", "30", "5", "650"])
+        bridge.handle_fox_command("FAMOVE", ["1", "B", "1^3^3^W"])
+        # AI 落子完成后：内部候选表清空，并且通知了界面
+        self.assertEqual(bridge._candidates, {})
+        self.assertEqual(seen[-1], [])
+
+        # 模拟一次「落子后仍有残余分析数据」的竞态，再让对手落子
+        bridge._candidates = {"Q16": {"move": (15, 3), "vertex": "Q16"}}
+        bridge._candidates_dirty = True
+        bridge.handle_fox_command("FAMOVE", ["0", "B", "2^15^3^B"])
+        self.assertEqual(bridge._candidates, {}, "对手回合必须清空候选点")
+        self.assertEqual(seen[-1], [], "对手回合必须通知界面撤掉候选点")
 
     def test_echoed_own_move_not_replayed(self):
         bridge, mgr, sink, _logs = make_bridge("katago")
@@ -324,14 +344,15 @@ class BridgeTest(unittest.TestCase):
 
     # ------------------------------------------------------------------ 分析
     def test_analyze_candidates_parsed(self):
-        bridge, mgr, _sink, _logs = make_bridge("katago")
+        bridge, _mgr, _sink, _logs = make_bridge("katago")
         self.bridge = bridge
-        bridge.handle_fox_command("FARULE", ["19", "60", "30", "5", "650"])
-        bridge.handle_fox_command("FAMOVE", ["1", "B", "1^3^3^W"])
-        self.assertIn("Q16", bridge._candidates)
+        # 直接喂一行 KataGo 的 info 数据，验证解析
+        bridge._parse_info(
+            "info move Q16 visits 120 winrate 0.61 scoreLead 2.4 order 0 pv Q16")
         cand = bridge._candidates["Q16"]
         self.assertAlmostEqual(cand["winrate"], 0.61, places=2)
         self.assertEqual(cand["visits"], 120)
+        self.assertEqual(cand["move"], (15, 3))
 
     def test_lz_winrate_scaled(self):
         bridge, _mgr, _sink, _logs = make_bridge("katago")

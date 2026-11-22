@@ -315,7 +315,7 @@ class GTPBridge:
         # 上一局残余的待完成命令必须清掉（引擎可能还在算上一局）
         self.session.reset("新对局", orphan_skip=True)
         self._setup_engine()
-        self._notify_candidates([])
+        self._clear_candidates()
         self.log("规则: 棋盘%d, 贴目%s, 让子%s, 时间 %d+%d×%d" % (
             size, self.komi, handicap_vertices or "无", main_time, byo_time, byo_count))
 
@@ -367,6 +367,8 @@ class GTPBridge:
             self._sync_dialect()
 
         self._sync_engine()
+        # 刚同步完状态，还不知道轮到谁：先撤掉候选点，等 $FAMOVE 再决定
+        self._clear_candidates()
         self.log("状态同步完成：%d 手，AI 执 %s" % (len(self._events), ai_color))
 
     # ---------------------------------------------------------------- FAMOVE
@@ -384,6 +386,9 @@ class GTPBridge:
         self._sync_engine()
         if is_ai_turn:
             self._ensure_genmove()
+        else:
+            # 轮到对手：棋盘上不该再留着 AI 的候选点
+            self._clear_candidates()
 
     def _ingest_fox_move(self, move_str):
         try:
@@ -444,6 +449,8 @@ class GTPBridge:
         self._sync_engine()
         if is_ai_turn:
             self._ensure_genmove()
+        else:
+            self._clear_candidates()
 
     # ---------------------------------------------------------------- FATIMELEFT
     def _handle_fatimeleft(self, items):
@@ -466,7 +473,7 @@ class GTPBridge:
             self._final_score_pending = False
             self._candidates = {}
             self._candidates_dirty = False
-        self._notify_candidates([])
+        self._clear_candidates()
         with self._lock:
             self._events = []
             self._engine_events = []
@@ -573,9 +580,7 @@ class GTPBridge:
             self._genmove_started = time.time()
             self._genmove_tries = 1
             self._analyzing = True
-        self._candidates = {}
-        self._candidates_dirty = False
-        self._notify_candidates([])
+        self._clear_candidates()
         self._send_genmove()
 
     def _send_genmove(self):
@@ -609,7 +614,7 @@ class GTPBridge:
             self._genmove_pending = False
             self._analyzing = False
         self.session.streaming = False
-        self._notify_candidates([])
+        self._clear_candidates()
 
         kind, vertex = self.dialect.parse_genmove(resp.body)
         if kind is None:
@@ -640,6 +645,7 @@ class GTPBridge:
         if kind == "resign":
             self.log("引擎认输")
             self.send_to_fox("AFGIVEUP", color)
+            self._clear_candidates()
             return
         if kind == "pass":
             with self._lock:
@@ -648,6 +654,7 @@ class GTPBridge:
                 self._engine_events.append((color, "pass"))
             self.log("AI 停一手")
             self.send_to_fox("AFSKIP", color)
+            self._clear_candidates()
             return
 
         xy = self._gtp_to_xy(vertex)
@@ -668,6 +675,8 @@ class GTPBridge:
         move_str = "%d^%d^%d^%s" % (n, x, y, color)
         self.send_to_fox("AFPLAY", color, move_str)
         self.log("AI 落子: %s %s -> AFPLAY %s" % (color, vertex, move_str))
+        # AI 已经落子，接下来是对手回合：撤掉棋盘上的候选点
+        self._clear_candidates()
 
     # ================================================================== 应答分发
     def _on_response(self, resp):
@@ -776,6 +785,17 @@ class GTPBridge:
                 self.on_candidate(cands)
             except Exception:
                 pass
+
+    def _clear_candidates(self):
+        """清空候选点，并通知界面把它们从棋盘上撤掉。
+
+        轮到对手落子时必须调用：否则上一步搜索残留的候选点会一直画在棋盘上，
+        看起来像「对手回合还在给 AI 选点」。
+        """
+        with self._lock:
+            self._candidates = {}
+            self._candidates_dirty = False
+        self._notify_candidates([])
 
     def _candidate_flush_loop(self):
         while True:
