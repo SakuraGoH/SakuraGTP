@@ -12,7 +12,7 @@ from PyQt5.QtWidgets import (
     QDialog, QScrollArea, QStackedWidget, QAction, QActionGroup,
 )
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QEvent
-from PyQt5.QtGui import QColor, QPalette, QPainter
+from PyQt5.QtGui import QColor, QPalette, QPainter, QTextCursor
 
 from config import load_config, save_config, push_history
 from engine_manager import EngineManager
@@ -31,6 +31,19 @@ from sci_widgets import (
 from starfield import Starfield, DAY_CYCLE_SEC
 from starcursor import make_star_cursor, StarTrailWidget
 import ui_dialogs
+
+# 引擎 stdout 里「不是 GTP 协议、但会疯狂刷屏」的行：
+#   info move ...                    kata-genmove_analyze / lz-analyze 的分析数据
+#   2026-11-22 03:59:39+0800: ...    KataGo 自己的日志（配置 dump、搜索树等）
+#   19 . . . . . . .                 日志里附带的棋盘打印
+#   Q4 : T -102.46c W ...            搜索树/选定着法统计
+_ENGINE_NOISE_PATTERNS = (
+    re.compile(r"^info(?:\s|$)"),
+    re.compile(r"^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}"),
+    re.compile(r"^\d{1,2}[ .XO@#+\-]{2,}$"),
+    re.compile(r"^[A-Z]\d{1,2}\s*[:=]"),
+    re.compile(r"^-{2,}"),
+)
 
 
 class SakuraGTPApp(QMainWindow):
@@ -72,6 +85,8 @@ class SakuraGTPApp(QMainWindow):
         self.api_server = APIServer(self, on_log=self._log_comm)
         self.runner = ContributeRunner(on_log=self._log_comm)
         self._last_game_time = time.time()
+        # GTP 输出页被过滤掉的行数（用于底部提示）
+        self._gtp_hidden_lines = 0
 
         # 深空星图背景
         self._starfield = Starfield()
@@ -562,7 +577,22 @@ class SakuraGTPApp(QMainWindow):
         gtp_layout.setSpacing(2)
 
         gtp_ctrl = QHBoxLayout()
+        self.chk_engine_debug = GlowCheckBox("显示引擎分析输出")
+        self.chk_engine_debug.setChecked(bool(self.cfg.get("log_engine_debug", False)))
+        self.chk_engine_debug.setToolTip(
+            "勾选后显示引擎原始 stdout（含 kata-genmove_analyze 的 info 行、KataGo 日志等）。\n"
+            "默认隐藏，避免每 50ms 一行、长达数 KB 的分析数据刷屏；\n"
+            "候选点/胜率仍然正常显示。")
+        self.chk_engine_debug.toggled.connect(self._on_engine_debug_toggled)
+        gtp_ctrl.addWidget(self.chk_engine_debug)
+        gtp_ctrl.addSpacing(10)
         gtp_ctrl.addStretch()
+        self.lbl_gtp_hidden = QLabel("")
+        self.lbl_gtp_hidden.setToolTip(
+            "引擎的 info move / 调试日志默认隐藏；勾选左侧可查看完整输出。")
+        self.lbl_gtp_hidden.setStyleSheet(
+            "color: %s;" % placeholder_color(self.cfg.get("bg_color", sci_fi_bg())))
+        gtp_ctrl.addWidget(self.lbl_gtp_hidden)
         btn_clear_gtp = GlowButton("清空")
         btn_clear_gtp.clicked.connect(self._clear_gtp)
         gtp_ctrl.addWidget(btn_clear_gtp)
@@ -573,6 +603,12 @@ class SakuraGTPApp(QMainWindow):
         gtp_layout.addWidget(self.gtp_text, stretch=1)
 
         self.tabs.addTab(gtp_tab, "GTP 输出")
+
+        # 每秒刷新一次「已隐藏 N 行」提示
+        self._gtp_hint_timer = QTimer(self)
+        self._gtp_hint_timer.setInterval(1000)
+        self._gtp_hint_timer.timeout.connect(self._refresh_gtp_hint)
+        self._gtp_hint_timer.start()
 
         board_tab = QWidget()
         board_layout = QVBoxLayout(board_tab)
@@ -1026,7 +1062,36 @@ class SakuraGTPApp(QMainWindow):
         self._update_winrate_curve(line)
 
     def _on_engine_raw(self, line):
+        # 引擎的 info move / 日志行每 50ms 一批、单行可达数 KB，默认不往日志里塞。
+        # 候选点和胜率仍由 bridge 解析后显示在棋盘上。
+        if not self.chk_engine_debug.isChecked() and self._is_engine_noise(line):
+            self._gtp_hidden_lines += 1
+            return
         self.gtp_signal.emit(line)
+
+    @staticmethod
+    def _is_engine_noise(line):
+        """True = 引擎分析/调试输出，不是 GTP 协议行。"""
+        text = (line or "").strip()
+        if not text:
+            return False
+        if text[0] in "=?" or text.startswith(">>>"):
+            return False
+        return any(pattern.match(text) for pattern in _ENGINE_NOISE_PATTERNS)
+
+    def _on_engine_debug_toggled(self, checked):
+        self.cfg["log_engine_debug"] = bool(checked)
+        save_config(self.cfg)
+        self._gtp_hidden_lines = 0
+        self._refresh_gtp_hint()
+        self._log_gtp(">>> 已开启引擎完整输出（含 info move / 引擎日志）" if checked
+                      else ">>> 已隐藏引擎分析/调试输出")
+
+    def _refresh_gtp_hint(self):
+        if self.chk_engine_debug.isChecked() or not self._gtp_hidden_lines:
+            self.lbl_gtp_hidden.setText("")
+            return
+        self.lbl_gtp_hidden.setText("已隐藏 %d 行" % self._gtp_hidden_lines)
 
     def _on_candidate(self, candidates):
         self.board_view.set_candidates(candidates)
@@ -1612,16 +1677,29 @@ class SakuraGTPApp(QMainWindow):
         self.gtp_signal.emit(msg)
 
     def _append_comm(self, msg):
-        self.comm_text.append(msg)
+        self._append_trimmed(self.comm_text, msg)
 
     def _append_gtp(self, msg):
-        self.gtp_text.append(msg)
+        self._append_trimmed(self.gtp_text, msg)
+
+    @staticmethod
+    def _append_trimmed(widget, text, keep=4000, drop=1000):
+        """追加一行，并在日志过长时丢掉最旧的部分，避免内存无限增长。"""
+        widget.append(text)
+        document = widget.document()
+        if document.blockCount() > keep:
+            cursor = QTextCursor(document)
+            cursor.movePosition(QTextCursor.Start)
+            cursor.movePosition(QTextCursor.Down, QTextCursor.KeepAnchor, drop)
+            cursor.removeSelectedText()
 
     def _clear_comm(self):
         self.comm_text.clear()
 
     def _clear_gtp(self):
         self.gtp_text.clear()
+        self._gtp_hidden_lines = 0
+        self._refresh_gtp_hint()
 
     # ============================================================ 帮助
     def _show_env_help(self):

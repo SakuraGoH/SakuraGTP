@@ -37,6 +37,9 @@ DEFAULT_CONFIG = {
     "remote_cmd": "",
     "window_geometry": "",
     "log_split": True,
+    # GTP 输出页是否显示引擎的分析/调试行（info move、KataGo 日志等）。
+    # 默认关闭：这些行每 50ms 刷一次、单行可达数 KB，会把日志淹没。
+    "log_engine_debug": False,
     "max_time": 5,
     "max_visits": 0,
     "max_playouts": 0,
