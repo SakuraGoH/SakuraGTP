@@ -5,7 +5,7 @@ from PyQt5.QtWidgets import QApplication
 
 from ui_main import SakuraGTPApp
 
-__version__ = "1.5.1"
+__version__ = "1.5.2"
 
 
 def main():

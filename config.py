@@ -52,7 +52,7 @@ DEFAULT_CONFIG = {
     "ssh_port": "22",
     "ssh_user": "",
     "ssh_cmd": "",
-    "version": "1.5.1",
+    "version": "1.5.2",
     # 心跳包
     "heartbeat_enabled": False,
     "heartbeat_interval": 30,         # 秒

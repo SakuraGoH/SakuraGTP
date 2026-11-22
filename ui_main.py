@@ -32,16 +32,10 @@ from starfield import Starfield, DAY_CYCLE_SEC
 from starcursor import make_star_cursor, StarTrailWidget
 import ui_dialogs
 
-# 引擎 stdout 里会刷屏、但本身不是 GTP 协议的内容。过滤必须按「块」处理，
-# 否则 showboard 这类多行响应会被切成半截：
-#   info move ...                    kata-genmove_analyze / lz-analyze 的分析数据
-#   2026-11-22 03:59:39+0800: ...    KataGo 自己的日志块（只有块首带时间戳，
-#                                    后面的棋盘/配置行没有，必须整块一起吞掉）
-_ENGINE_LOG_BLOCK = re.compile(r"^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}")
+# 只过滤这一种：kata-genmove_analyze / lz-analyze 的分析流，每 50ms 一批、
+# 单行上万字符。除此之外的引擎输出（GTP 响应、showboard 棋盘、KataGo 日志、
+# MALKOVICH、搜索信息……）一律原样显示，保证日志完整。
 _ENGINE_INFO_LINE = re.compile(r"^info(?:\s|$)")
-# analyze 命令最后那行裸 "play XXX"：很短、有用，而且不属于任何日志块
-_ENGINE_PLAY_LINE = re.compile(r"^play\s+\S+$", re.IGNORECASE)
-_GTP_BLOCK_LIMIT = 400       # 防御：日志块异常长时强制结束，避免吞掉后续输出
 
 class SakuraGTPApp(QMainWindow):
     comm_signal = pyqtSignal(str)
@@ -52,7 +46,7 @@ class SakuraGTPApp(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("SakuraGTP 1.5.1 - 野狐围棋 AI 连线器")
+        self.setWindowTitle("SakuraGTP 1.5.2 - 野狐围棋 AI 连线器")
         self.resize(1800, 1000)
         self.setMinimumSize(1480, 860)
 
@@ -84,9 +78,6 @@ class SakuraGTPApp(QMainWindow):
         self._last_game_time = time.time()
         # GTP 输出页被过滤掉的行数（用于底部提示）
         self._gtp_hidden_lines = 0
-        # GTP 输出页的「块」状态："" / "show"（响应体）/ "hide"（引擎日志块）
-        self._gtp_block = ""
-        self._gtp_block_lines = 0
 
         # 深空星图背景
         self._starfield = Starfield()
@@ -580,9 +571,8 @@ class SakuraGTPApp(QMainWindow):
         self.chk_engine_debug = GlowCheckBox("显示引擎分析输出")
         self.chk_engine_debug.setChecked(bool(self.cfg.get("log_engine_debug", False)))
         self.chk_engine_debug.setToolTip(
-            "勾选后显示引擎原始 stdout（含 kata-genmove_analyze 的 info 行、KataGo 日志等）。\n"
-            "默认隐藏，避免每 50ms 一行、长达数 KB 的分析数据刷屏；\n"
-            "候选点/胜率仍然正常显示。")
+            "勾选后连 kata-genmove_analyze 的 info 分析行也显示（每 50ms 一批、\n"
+            "单行可达上万字符）。不勾选时只隐藏这一种行，其余引擎输出完整显示。")
         self.chk_engine_debug.toggled.connect(self._on_engine_debug_toggled)
         gtp_ctrl.addWidget(self.chk_engine_debug)
         gtp_ctrl.addSpacing(10)
@@ -1062,75 +1052,24 @@ class SakuraGTPApp(QMainWindow):
         self._update_winrate_curve(line)
 
     def _on_engine_raw(self, line):
-        """引擎 stdout 的一行（按「块」过滤，保证多行输出完整）。
+        """引擎 stdout 的一行。
 
-        规则：
-        * ``=`` / ``?`` 开头的是 GTP 响应，它的响应体（``showboard`` 的棋盘、
-          ``list_commands``、``printsgf`` 等）整块原样显示，绝不截断；
-        * 引擎自己的日志块整块隐藏（KataGo 只在块首打时间戳，后面的棋盘/配置行
-          没有时间戳，必须连在一起吞掉，否则会出现「半块棋盘」）；
-        * ``info move ...`` 分析行逐行隐藏（每 50ms 一批、单行可达数 KB）。
+        只隐藏 ``info move ...`` 分析流（每 50ms 一批、单行可达上万字符，
+        棋盘上的候选点/胜率已经由 bridge 解析后显示）。其余全部原样输出：
+        GTP 响应与其多行响应体（``showboard`` 棋盘、``list_commands``、
+        ``printsgf``）、KataGo 日志、``MALKOVICH`` 行、裸 ``play XXX`` 等，
+        所以日志永远是完整的，不会出现「半块棋盘」或「什么都没了」。
         """
         text = (line or "").strip()
-
-        if self.chk_engine_debug.isChecked():
-            self.gtp_signal.emit(line)
-            return
-
-        if not text:
-            # 空行既结束响应体，也结束日志块
-            self._gtp_block = ""
-            self._gtp_block_lines = 0
-            self.gtp_signal.emit(line)
-            return
-
-        if text[0] in "=?":
-            self._gtp_block = "show"
-            self._gtp_block_lines = 0
-            self.gtp_signal.emit(line)
-            return
-
-        if self._gtp_block == "show":
-            if _ENGINE_LOG_BLOCK.match(text):
-                # 响应体里混进了新日志块：结束响应体，转去按日志块处理
-                self._gtp_block = ""
-            else:
-                self.gtp_signal.emit(line)
-                return
-
-        if _ENGINE_PLAY_LINE.match(text):
-            # 裸 "play K14"：analyze 的最终落子，永远显示
-            self._gtp_block = ""
-            self._gtp_block_lines = 0
-            self.gtp_signal.emit(line)
-            return
-
-        if self._gtp_block == "hide":
-            self._gtp_block_lines += 1
-            self._gtp_hidden_lines += 1
-            if self._gtp_block_lines > _GTP_BLOCK_LIMIT:
-                self._gtp_block = ""
-                self._gtp_block_lines = 0
-            return
-
-        if _ENGINE_LOG_BLOCK.match(text):
-            self._gtp_block = "hide"
-            self._gtp_block_lines = 1
+        if not self.chk_engine_debug.isChecked() and _ENGINE_INFO_LINE.match(text):
             self._gtp_hidden_lines += 1
             return
-
-        if _ENGINE_INFO_LINE.match(text):
-            self._gtp_hidden_lines += 1
-            return
-
         self.gtp_signal.emit(line)
 
     def _on_engine_debug_toggled(self, checked):
         self.cfg["log_engine_debug"] = bool(checked)
         save_config(self.cfg)
         self._gtp_hidden_lines = 0
-        self._gtp_block = ""
-        self._gtp_block_lines = 0
         self._refresh_gtp_hint()
         self._log_gtp(">>> 已开启引擎完整输出（含 info move / 引擎日志）" if checked
                       else ">>> 已隐藏引擎分析/调试输出")
@@ -1751,15 +1690,13 @@ class SakuraGTPApp(QMainWindow):
     def _clear_gtp(self):
         self.gtp_text.clear()
         self._gtp_hidden_lines = 0
-        self._gtp_block = ""
-        self._gtp_block_lines = 0
         self._refresh_gtp_hint()
 
     # ============================================================ 帮助
     def _show_env_help(self):
         QMessageBox.information(
             self, "依赖环境",
-            "SakuraGTP 1.5.1 依赖环境\n\n"
+            "SakuraGTP 1.5.2 依赖环境\n\n"
             "Windows 10 / 11，64 位\n"
             "VC++ 2010 x86 / VC++ 2015-2022 x64\n"
             "AI 引擎 (KataGo / LeelaZero)\n"
@@ -1787,7 +1724,7 @@ class SakuraGTPApp(QMainWindow):
     def _show_about(self):
         QMessageBox.information(
             self, "关于",
-            "SakuraGTP 1.5.1\n野狐围棋 AI 连线器"
+            "SakuraGTP 1.5.2\n野狐围棋 AI 连线器"
         )
 
     # ============================================================ 关闭
