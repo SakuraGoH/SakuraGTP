@@ -99,6 +99,81 @@ def open_reconnect_dialog(app):
     dlg.exec_()
 
 
+# ---------- 时间与传输设置（对应 FoxGTP 手册 4.4） ----------
+def open_time_options_dialog(app):
+    dlg = QDialog(app)
+    dlg.setWindowTitle("时间与传输设置")
+    dlg.resize(480, 360)
+
+    layout = QFormLayout(dlg)
+
+    byo_combo = GlowComboBox()
+    byo_combo.addItems([
+        "加拿大读秒（折算成每周期 1 子）",
+        "常用读秒（N 秒 × M 次）",
+    ])
+    byo_combo.setCurrentIndex(1 if app.cfg.get("use_common_byo_yomi", False) else 0)
+    layout.addRow("读秒方式:", byo_combo)
+
+    chk_transfer = GlowCheckBox("启用数据传输时间（从读秒里扣除传输耗时，防野狐超时）")
+    chk_transfer.setChecked(int(app.cfg.get("data_transfer_time", 0)) > 0)
+    layout.addRow("", chk_transfer)
+
+    transfer_edit = GlowLineEdit(str(app.cfg.get("data_transfer_time", 1) or 1))
+    layout.addRow("数据传输时间（秒）:", transfer_edit)
+
+    chk_ai_byo = GlowCheckBox("指定 AI 读秒时间（忽略野狐的读秒设置）")
+    chk_ai_byo.setChecked(bool(app.cfg.get("specify_ai_byo_yomi", False)))
+    layout.addRow("", chk_ai_byo)
+
+    ai_byo_edit = GlowLineEdit(str(app.cfg.get("ai_byo_yomi_time", 5)))
+    layout.addRow("AI 读秒（秒）:", ai_byo_edit)
+
+    chk_hb = GlowCheckBox("启用引擎心跳（protocol_version 保活 + 假死检测）")
+    chk_hb.setChecked(bool(app.cfg.get("heartbeat_enabled", False)))
+    layout.addRow("", chk_hb)
+
+    hb_interval = GlowLineEdit(str(app.cfg.get("heartbeat_interval", 30)))
+    layout.addRow("心跳间隔（秒）:", hb_interval)
+
+    hb_timeout = GlowLineEdit(str(app.cfg.get("heartbeat_timeout", 10)))
+    layout.addRow("心跳超时（秒）:", hb_timeout)
+
+    def _int_or(text, default):
+        try:
+            return int(text)
+        except (TypeError, ValueError):
+            return default
+
+    def on_save():
+        app.cfg["use_common_byo_yomi"] = byo_combo.currentIndex() == 1
+        transfer = _int_or(transfer_edit.text(), 1)
+        if chk_transfer.isChecked():
+            app.cfg["data_transfer_time"] = max(1, transfer)
+        else:
+            app.cfg["data_transfer_time"] = 0
+        app.cfg["specify_ai_byo_yomi"] = chk_ai_byo.isChecked()
+        app.cfg["ai_byo_yomi_time"] = max(1, _int_or(ai_byo_edit.text(), 5))
+        app.cfg["heartbeat_enabled"] = chk_hb.isChecked()
+        app.cfg["heartbeat_interval"] = max(5, _int_or(hb_interval.text(), 30))
+        app.cfg["heartbeat_timeout"] = max(1, _int_or(hb_timeout.text(), 10))
+        save_config(app.cfg)
+        app._apply_engine_params()
+        app.engine.set_heartbeat(
+            app.cfg["heartbeat_enabled"],
+            app.cfg["heartbeat_interval"],
+            app.cfg["heartbeat_timeout"],
+        )
+        app._log_comm("时间与传输设置已保存")
+        dlg.accept()
+
+    btn = GlowButton("保存")
+    btn.clicked.connect(on_save)
+    layout.addRow("", btn)
+
+    dlg.exec_()
+
+
 # ---------- API Token 设置 ----------
 def open_token_dialog(app):
     dlg = QDialog(app)

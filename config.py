@@ -26,6 +26,11 @@ DEFAULT_CONFIG = {
     "comm_mode": "stdio",
     "ai_ip": "127.0.0.1",
     "ai_port": 8000,
+    # 引擎连接方式（对齐 FoxGTP 的通信菜单）：0=本地进程 1=TCP 客户端 2=TCP 服务端
+    "engine_link_mode": 0,
+    "engine_tcp_host": "127.0.0.1",
+    "engine_tcp_port": 8888,
+    "engine_tcp_auto_reconnect": True,
     "use_common_byo_yomi": False,
     "data_transfer_time": 1,
     "specify_ai_byo_yomi": False,
@@ -52,7 +57,7 @@ DEFAULT_CONFIG = {
     "ssh_port": "22",
     "ssh_user": "",
     "ssh_cmd": "",
-    "version": "1.5.5",
+    "version": "1.6.0",
     # 心跳包
     "heartbeat_enabled": False,
     "heartbeat_interval": 30,         # 秒

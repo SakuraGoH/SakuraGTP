@@ -47,7 +47,7 @@ class SakuraGTPApp(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("SakuraGTP 1.5.5 - 野狐围棋 AI 连线器")
+        self.setWindowTitle("SakuraGTP 1.6.0 - 野狐围棋 AI 连线器")
         self.resize(1800, 1000)
         self.setMinimumSize(1480, 860)
 
@@ -56,6 +56,8 @@ class SakuraGTPApp(QMainWindow):
         self.engine = EngineManager(
             on_output=self._on_engine_output,
             on_exit=self._on_engine_exit_signal,
+            on_connected=self._on_engine_connected,
+            on_disconnected=self._on_engine_disconnected,
         )
         self.fox = FoxClientServer(
             on_command=self._on_fox_command,
@@ -245,6 +247,7 @@ class SakuraGTPApp(QMainWindow):
         tools_menu.addAction("自动跑谱设置", self._open_contribute_dialog)
         tools_menu.addAction("手动停止跑谱", self._manual_stop_contribute)
         tools_menu.addSeparator()
+        tools_menu.addAction("时间与传输设置", self._open_time_options_dialog)
         tools_menu.addAction("心跳设置", self._open_heartbeat_dialog)
         tools_menu.addAction("断线重连设置", self._open_reconnect_dialog)
         tools_menu.addAction("API Token 设置", self._open_token_dialog)
@@ -352,8 +355,43 @@ class SakuraGTPApp(QMainWindow):
         comm_row.addWidget(btn_auto_cmd)
         engine_form.addRow("通用命令行:", comm_row)
 
+        # 连接方式（对齐 FoxGTP 的通信菜单）：本地进程 / TCP 客户端 / TCP 服务端
+        self.engine_link_combo = GlowComboBox()
+        self.engine_link_combo.addItems([
+            "本地进程（stdio）",
+            "TCP 客户端（连引擎）",
+            "TCP 服务端（引擎连我）",
+        ])
+        try:
+            self.engine_link_combo.setCurrentIndex(
+                int(self.cfg.get("engine_link_mode", 0)))
+        except (TypeError, ValueError):
+            self.engine_link_combo.setCurrentIndex(0)
+        self.engine_link_combo.currentIndexChanged.connect(self._on_link_mode_changed)
+        engine_form.addRow("连接方式:", self.engine_link_combo)
+
+        self.tcp_row_widget = QWidget()
+        tcp_row = QHBoxLayout(self.tcp_row_widget)
+        tcp_row.setContentsMargins(0, 0, 0, 0)
+        self.tcp_host_edit = GlowLineEdit(str(self.cfg.get("engine_tcp_host", "127.0.0.1")))
+        self.tcp_host_edit.setPlaceholderText("127.0.0.1 或 remote-ip")
+        self.tcp_port_edit = GlowLineEdit(str(self.cfg.get("engine_tcp_port", 8888)))
+        self.tcp_port_edit.setFixedWidth(80)
+        tcp_row.addWidget(QLabel("地址:"))
+        tcp_row.addWidget(self.tcp_host_edit, stretch=1)
+        tcp_row.addWidget(QLabel("端口:"))
+        tcp_row.addWidget(self.tcp_port_edit)
+        engine_form.addRow("TCP 引擎:", self.tcp_row_widget)
+        self._on_link_mode_changed(self.engine_link_combo.currentIndex())
+        self._tcp_engine_hint = ""
+
         engine_group.setLayout(engine_form)
         local_layout.addWidget(engine_group)
+
+        self.lbl_quick_hint = QLabel(
+            "三步开战：① 选引擎（或连接方式） ② 点「一键启动」 ③ 野狐客户端里选择 AI 接入")
+        self.lbl_quick_hint.setWordWrap(True)
+        local_layout.addWidget(self.lbl_quick_hint)
 
         local_btn_layout = QHBoxLayout()
         self.btn_start_engine = GlowButton("启动引擎")
@@ -361,8 +399,12 @@ class SakuraGTPApp(QMainWindow):
         self.btn_stop_engine = GlowButton("停止引擎")
         self.btn_stop_engine.clicked.connect(self._stop_engine)
         self.btn_stop_engine.setEnabled(False)
+        self.btn_quick_start = GlowButton("一键启动")
+        self.btn_quick_start.setToolTip("启动引擎并开始监听野狐客户端，一步到位")
+        self.btn_quick_start.clicked.connect(self._quick_start)
         local_btn_layout.addWidget(self.btn_start_engine)
         local_btn_layout.addWidget(self.btn_stop_engine)
+        local_btn_layout.addWidget(self.btn_quick_start)
         local_layout.addLayout(local_btn_layout)
 
         local_fox_group = HudGroupBox("野狐客户端监听")
@@ -482,6 +524,11 @@ class SakuraGTPApp(QMainWindow):
         self.btn_refresh_state = GlowButton("刷新落子参数")
         self.btn_refresh_state.clicked.connect(self._refresh_state)
         param_layout.addRow("", self.btn_refresh_state)
+
+        self.btn_time_options = GlowButton("时间/传输设置…")
+        self.btn_time_options.setToolTip("读秒口径、数据传输时间、指定 AI 读秒、心跳")
+        self.btn_time_options.clicked.connect(self._open_time_options_dialog)
+        param_layout.addRow("", self.btn_time_options)
 
         self.winrate_param_widget.setVisible(True)
         live_layout.addWidget(self.winrate_param_widget)
@@ -756,6 +803,36 @@ class SakuraGTPApp(QMainWindow):
             self._log_comm("启动引擎时出错: %s" % exc)
 
     def _start_engine_inner(self):
+        # 连接方式优先：TCP 模式不需要本地引擎/权重路径
+        link_mode = self.engine_link_combo.currentIndex()
+        host = self.tcp_host_edit.text().strip() or "127.0.0.1"
+        try:
+            port = int(self.tcp_port_edit.text())
+        except ValueError:
+            port = 8888
+        self.cfg["engine_link_mode"] = link_mode
+        self.cfg["engine_tcp_host"] = host
+        self.cfg["engine_tcp_port"] = port
+        save_config(self.cfg)
+        if link_mode != 0:
+            self._tcp_engine_hint = "tcp:%s:%d" % (host, port)
+            self.engine.set_auto_reconnect(
+                bool(self.cfg.get("engine_tcp_auto_reconnect", True)),
+                int(self.cfg.get("reconnect_interval", 5)))
+            if link_mode == 1:
+                ok, msg = self.engine.start_tcp_client(host, port)
+            else:
+                ok, msg = self.engine.start_tcp_server(host, port)
+            self._log_comm(msg)
+            if not ok:
+                self._stop_engine()
+                return
+            # 真正连上以后由 _on_engine_connected 通知桥接层探测/重建
+            self.btn_start_engine.setEnabled(False)
+            self.btn_stop_engine.setEnabled(True)
+            self._lock_browse(True)
+            return
+
         engine_path = self.engine_combo.currentText().strip()
         weight_path = self.weight_combo.currentText().strip()
         config_path = self.config_combo.currentText().strip()
@@ -898,6 +975,28 @@ class SakuraGTPApp(QMainWindow):
 
     def _on_engine_exit_signal(self):
         self.engine_exit_signal.emit()
+
+    def _on_engine_connected(self):
+        """TCP 引擎连接成功（含断线重连）：通知桥接层重新探测、重建局面。"""
+        hint = getattr(self, "_tcp_engine_hint", "") or "tcp"
+        self.bridge.on_engine_started(hint)
+        self.btn_start_engine.setEnabled(False)
+        self.btn_stop_engine.setEnabled(True)
+        self._lock_browse(True)
+
+    def _on_engine_disconnected(self):
+        self._log_comm("引擎连接断开，等待自动重连…")
+        self.bridge.on_engine_stopped()
+
+    def _on_link_mode_changed(self, index):
+        self.tcp_row_widget.setVisible(index != 0)
+
+    def _quick_start(self):
+        """一键启动：起引擎（按当前连接方式） + 监听野狐客户端。"""
+        if not self.engine.is_running() and not self.engine.is_listening():
+            self._start_engine()
+        if not self.fox.is_listening():
+            self._start_fox()
 
     # ============================================================ 自动跑谱
     def _idle_loop(self):
@@ -1199,7 +1298,7 @@ class SakuraGTPApp(QMainWindow):
                 use_go_byoyomi=self.cfg.get("use_common_byo_yomi", False),
                 use_data_transfer_time=bool(self.cfg.get("data_transfer_time", 0)),
                 data_transfer_time=int(self.cfg.get("data_transfer_time", 1)),
-                specify_ai_byoyomi=self.cfg.get("specify_ai_byoyomi", False),
+                specify_ai_byoyomi=self.cfg.get("specify_ai_byo_yomi", False),
                 ai_byoyomi_time=int(self.cfg.get("ai_byo_yomi_time", 5)),
             )
         except Exception:
@@ -1416,6 +1515,9 @@ class SakuraGTPApp(QMainWindow):
     # ============================================================ 工具菜单对话框
     def _open_heartbeat_dialog(self):
         ui_dialogs.open_heartbeat_dialog(self)
+
+    def _open_time_options_dialog(self):
+        ui_dialogs.open_time_options_dialog(self)
 
     def _open_reconnect_dialog(self):
         ui_dialogs.open_reconnect_dialog(self)
@@ -1762,7 +1864,7 @@ class SakuraGTPApp(QMainWindow):
     def _show_env_help(self):
         QMessageBox.information(
             self, "依赖环境",
-            "SakuraGTP 1.5.5 依赖环境\n\n"
+            "SakuraGTP 1.6.0 依赖环境\n\n"
             "Windows 10 / 11，64 位\n"
             "VC++ 2010 x86 / VC++ 2015-2022 x64\n"
             "AI 引擎 (KataGo / LeelaZero)\n"
@@ -1790,7 +1892,7 @@ class SakuraGTPApp(QMainWindow):
     def _show_about(self):
         QMessageBox.information(
             self, "关于",
-            "SakuraGTP 1.5.5\n野狐围棋 AI 连线器"
+            "SakuraGTP 1.6.0\n野狐围棋 AI 连线器"
         )
 
     # ============================================================ 关闭

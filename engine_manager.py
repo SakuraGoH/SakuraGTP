@@ -1,6 +1,7 @@
 import os
 import queue
 import signal
+import socket
 import subprocess
 import threading
 import time
@@ -22,18 +23,32 @@ class EngineManager:
     统一通过 on_output 行回调输出，支持 GTP 心跳假死检测。
     """
 
-    def __init__(self, on_output=None, on_error=None, on_exit=None):
+    def __init__(self, on_output=None, on_error=None, on_exit=None,
+                 on_connected=None, on_disconnected=None):
         self.proc = None
         self.ssh_client = None
         self._ssh_channel = None
         self.on_output = on_output
         self.on_error = on_error
         self.on_exit = on_exit
+        self.on_connected = on_connected
+        self.on_disconnected = on_disconnected
         self._reader_thread = None
         self._running = False
         self._lock = threading.Lock()
         self._remote_mode = False
         self._ssh_mode = False
+
+        # ---- 连接方式：stdio（本地进程）/ tcp-client / tcp-server / ssh ----
+        self._mode = "stdio"
+        self._sock = None             # TCP 引擎连接
+        self._server_sock = None      # tcp-server 监听
+        self._tcp_host = ""
+        self._tcp_port = 0
+        self._auto_reconnect = True
+        self._reconnect_interval = 5
+        self._reconnect_thread = None
+        self._reconnect_gen = 0
 
         # 引擎写队列：send() 只入队，真正写 stdin 在独立线程里做。
         # 这样断线重连时一次补几百手也不会把 Fox 读线程卡在管道写满上，
@@ -113,6 +128,7 @@ class EngineManager:
                     creationflags=creationflags,
                 )
                 self._running = True
+                self._mode = "stdio"
                 self._reader_thread = threading.Thread(target=self._read_loop, daemon=True)
                 self._reader_thread.start()
                 self._start_writer()
@@ -144,6 +160,162 @@ class EngineManager:
         self._running = False
         if self.on_exit:
             self.on_exit()
+
+    # ---------- TCP 引擎（FoxGTP 的另外两种通信方式） ----------
+    def start_tcp_client(self, host, port):
+        """连接一个已经在监听端口的 GTP 引擎（如 ikatago / 各类 TCP 转发）。"""
+        with self._lock:
+            if self._running:
+                return False, "引擎已在运行"
+        try:
+            sock = socket.create_connection((host, int(port)), timeout=5)
+            sock.settimeout(None)
+        except Exception as exc:
+            return False, f"连接 {host}:{port} 失败: {exc}"
+        self._tcp_host, self._tcp_port = host, int(port)
+        self._mode = "tcp-client"
+        self._remote_mode = True
+        self._ssh_mode = False
+        self._sock = sock
+        self._running = True
+        self._spawn_reader(sock)
+        self._start_writer()
+        self._start_heartbeat()
+        if self.on_connected:
+            self.on_connected()
+        return True, f"已连接 GTP 引擎 {host}:{port}"
+
+    def start_tcp_server(self, host, port):
+        """监听端口，等引擎主动连进来（如 StandardIOToTcp 转发程序）。"""
+        with self._lock:
+            if self._running:
+                return False, "引擎已在运行"
+        try:
+            srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            srv.bind((host or "0.0.0.0", int(port)))
+            srv.listen(1)
+        except Exception as exc:
+            try:
+                srv.close()
+            except Exception:
+                pass
+            return False, f"监听 {host}:{port} 失败: {exc}"
+        self._tcp_host, self._tcp_port = host, int(port)
+        self._mode = "tcp-server"
+        self._remote_mode = True
+        self._ssh_mode = False
+        self._server_sock = srv
+        self._running = True
+        threading.Thread(target=self._accept_loop, args=(srv,), daemon=True).start()
+        return True, f"正在监听 {host}:{port}，等待 GTP 引擎连接"
+
+    def _accept_loop(self, srv):
+        while self._running and self._server_sock is srv:
+            try:
+                srv.settimeout(1.0)
+                conn, addr = srv.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            with self._lock:
+                old = self._sock
+                self._sock = conn
+            if old is not None:
+                try:
+                    old.close()
+                except OSError:
+                    pass
+                if self.on_output:
+                    self.on_output(">>> [连接] 新引擎接入，已断开旧连接")
+            if self.on_output:
+                self.on_output(f">>> [连接] GTP 引擎已接入 {addr[0]}:{addr[1]}")
+            self._start_writer()
+            self._start_heartbeat()
+            self._spawn_reader(conn)
+            if self.on_connected:
+                self.on_connected()
+
+    def _spawn_reader(self, conn):
+        threading.Thread(target=self._read_socket_loop, args=(conn,), daemon=True).start()
+
+    def _read_socket_loop(self, conn):
+        buffer = b""
+        while self._running and self._sock is conn:
+            try:
+                data = conn.recv(4096)
+                if not data:
+                    break
+                buffer += data
+                while b"\n" in buffer:
+                    line, buffer = buffer.split(b"\n", 1)
+                    text = line.decode("utf-8", errors="ignore").rstrip("\r")
+                    if text and self.on_output:
+                        if "protocol_version" in text or text.strip().startswith("="):
+                            self._last_heartbeat_reply = time.time()
+                        self.on_output(text)
+            except OSError:
+                break
+            except Exception:
+                break
+        self._socket_lost(conn)
+
+    def _socket_lost(self, conn=None):
+        if conn is not None and self._sock is not conn:
+            return
+        with self._lock:
+            sock, self._sock = self._sock, None
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
+        if not self._running:
+            return
+        if self.on_output:
+            self.on_output(">>> [断开] 与 GTP 引擎的 TCP 连接断开了")
+        if self.on_disconnected:
+            self.on_disconnected()
+        if self._mode == "tcp-client" and self._auto_reconnect:
+            self._start_reconnect_loop()
+
+    def _start_reconnect_loop(self):
+        if self._reconnect_thread is not None and self._reconnect_thread.is_alive():
+            return
+        gen = self._reconnect_gen
+        self._reconnect_thread = threading.Thread(
+            target=self._reconnect_loop, args=(gen,), daemon=True)
+        self._reconnect_thread.start()
+
+    def _reconnect_loop(self, gen):
+        while self._running and gen == self._reconnect_gen and self._sock is None:
+            time.sleep(max(1, int(self._reconnect_interval)))
+            if not self._running or gen != self._reconnect_gen or self._sock is not None:
+                return
+            try:
+                sock = socket.create_connection(
+                    (self._tcp_host, self._tcp_port), timeout=5)
+                sock.settimeout(None)
+            except Exception:
+                continue
+            self._sock = sock
+            if self.on_output:
+                self.on_output(
+                    f">>> [重连] 已重新连接 GTP 引擎 {self._tcp_host}:{self._tcp_port}")
+            self._start_writer()
+            self._start_heartbeat()
+            self._spawn_reader(sock)
+            if self.on_connected:
+                self.on_connected()
+            return
+
+    def set_auto_reconnect(self, enabled, interval=5):
+        self._auto_reconnect = bool(enabled)
+        self._reconnect_interval = max(1, int(interval))
+
+    def is_listening(self):
+        return self._running and self._server_sock is not None
 
     # ---------- 心跳 ----------
     def _start_heartbeat(self):
@@ -183,9 +355,13 @@ class EngineManager:
                 # 超过 timeout+2 秒没响应，判定假死
                 if self.on_output:
                     self.on_output(f"[心跳] 引擎无响应 {elapsed:.1f} 秒，判定假死")
-                if self.on_exit:
-                    self.on_exit()
-                self.stop()
+                if self._mode.startswith("tcp"):
+                    # TCP 模式按 FoxGTP 的做法自动重连，不用用户手动重启
+                    self._socket_lost()
+                else:
+                    if self.on_exit:
+                        self.on_exit()
+                    self.stop()
                 break
 
     # ---------- 内嵌 SSH ----------
@@ -236,6 +412,7 @@ class EngineManager:
         self._ssh_channel = channel
         self._running = True
         self._ssh_mode = True
+        self._mode = "ssh"
         self._remote_mode = False
         self._reader_thread = threading.Thread(target=self._read_ssh_loop, daemon=True)
         self._reader_thread.start()
@@ -284,7 +461,9 @@ class EngineManager:
             if text is None:
                 break
             try:
-                if self._ssh_mode and self._ssh_channel:
+                if self._sock is not None:
+                    self._sock.sendall(text.encode("utf-8"))
+                elif self._ssh_mode and self._ssh_channel:
                     self._ssh_channel.send(text.encode("utf-8"))
                 elif self.proc and self.proc.poll() is None and self.proc.stdin:
                     self.proc.stdin.write(text.encode("utf-8"))
@@ -304,6 +483,9 @@ class EngineManager:
         """把一行 GTP 命令放进发送队列（立即返回，绝不在调用线程里等管道）。"""
         if not text.endswith("\n"):
             text += "\n"
+        if self._sock is not None:
+            self._write_queue.put(text)
+            return True
         if self._ssh_mode:
             if not self._ssh_channel or self._ssh_channel.closed:
                 return False
@@ -319,6 +501,26 @@ class EngineManager:
             was_running = self._running
             self._running = False
             self._hb_generation += 1
+            self._reconnect_gen += 1
+            # 关掉 TCP 连接与监听
+            sock, self._sock = self._sock, None
+            if sock is not None:
+                try:
+                    if self.on_output:
+                        self.on_output(">>> [停止] TCP 连接已关闭")
+                    sock.sendall(b"quit\n")
+                except Exception:
+                    pass
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+            srv, self._server_sock = self._server_sock, None
+            if srv is not None:
+                try:
+                    srv.close()
+                except OSError:
+                    pass
             if self._ssh_mode:
                 if self._ssh_channel:
                     if self.on_output:
@@ -376,6 +578,8 @@ class EngineManager:
         return True
 
     def is_running(self):
+        if self._mode.startswith("tcp"):
+            return self._running and self._sock is not None
         if self._ssh_mode and self._ssh_channel:
             return self._running and not self._ssh_channel.closed
         return self._running and self.proc is not None and self.proc.poll() is None
