@@ -41,6 +41,8 @@ DEFAULT_CONFIG = {
     "remote_cmd": "",
     "window_geometry": "",
     "log_split": True,
+    # 通信协议 / GTP 输出每隔多少分钟清一次旧内容（0 = 不清）
+    "log_auto_clear_minutes": 5,
     # GTP 输出页是否显示引擎的分析/调试行（info move、KataGo 日志等）。
     # 默认关闭：这些行每 50ms 刷一次、单行可达数 KB，会把日志淹没。
     "log_engine_debug": False,
@@ -56,7 +58,7 @@ DEFAULT_CONFIG = {
     "ssh_port": "22",
     "ssh_user": "",
     "ssh_cmd": "",
-    "version": "1.6.1",
+    "version": "1.6.2",
     # 心跳包
     "heartbeat_enabled": False,
     "heartbeat_interval": 30,         # 秒

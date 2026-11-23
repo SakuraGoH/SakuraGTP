@@ -37,6 +37,13 @@ import ui_dialogs
 # MALKOVICH、搜索信息……）一律原样显示，保证日志完整。
 _ENGINE_INFO_LINE = re.compile(r"^info(?:\s|$)")
 
+# 引擎连接方式（菜单「连接」里的三项，与 FoxGTP 的通信菜单对应）
+LINK_MODE_NAMES = (
+    "本地进程（stdio）",
+    "TCP 客户端（连引擎）",
+    "TCP 服务端（引擎连我）",
+)
+
 class SakuraGTPApp(QMainWindow):
     comm_signal = pyqtSignal(str)
     gtp_signal = pyqtSignal(str)
@@ -47,11 +54,17 @@ class SakuraGTPApp(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("SakuraGTP 1.6.1 - 野狐围棋 AI 连线器")
+        self.setWindowTitle("SakuraGTP 1.6.2 - 野狐围棋 AI 连线器")
         self.resize(1800, 1000)
         self.setMinimumSize(1480, 860)
 
         self.cfg = load_config()
+        try:
+            self._link_mode = int(self.cfg.get("engine_link_mode", 0))
+        except (TypeError, ValueError):
+            self._link_mode = 0
+        if self._link_mode not in (0, 1, 2):
+            self._link_mode = 0
 
         self.engine = EngineManager(
             on_output=self._on_engine_output,
@@ -243,6 +256,19 @@ class SakuraGTPApp(QMainWindow):
         self.act_daynight.toggled.connect(
             lambda on: on and self._set_bg_mode("daynight"))
 
+        # 连接方式（原来在左侧面板，移到菜单栏，减少面板拥挤）
+        link_menu = menubar.addMenu("连接")
+        self.link_actions = []
+        self.link_group = QActionGroup(self)
+        self.link_group.setExclusive(True)
+        for idx, name in enumerate(LINK_MODE_NAMES):
+            act = QAction(name, self, checkable=True)
+            act.triggered.connect(
+                lambda _checked=False, i=idx: self._set_link_mode(i))
+            self.link_group.addAction(act)
+            link_menu.addAction(act)
+            self.link_actions.append(act)
+
         tools_menu = menubar.addMenu("工具")
         tools_menu.addAction("HTTP API", self._open_api_window)
         tools_menu.addAction("自动跑谱设置", self._open_contribute_dialog)
@@ -281,6 +307,8 @@ class SakuraGTPApp(QMainWindow):
 
         self.left_scroll = left_scroll
         self._build_right(main_layout, left_scroll)
+        # 菜单里的连接方式与界面状态同步（此时左侧控件已建好）
+        self._set_link_mode(self._link_mode, log=False)
 
     def _build_left(self, layout):
         mode_group = HudGroupBox("引擎模式")
@@ -355,21 +383,7 @@ class SakuraGTPApp(QMainWindow):
         comm_row.addWidget(btn_auto_cmd)
         engine_form.addRow("通用命令行:", comm_row)
 
-        # 连接方式（对齐 FoxGTP 的通信菜单）：本地进程 / TCP 客户端 / TCP 服务端
-        self.engine_link_combo = GlowComboBox()
-        self.engine_link_combo.addItems([
-            "本地进程（stdio）",
-            "TCP 客户端（连引擎）",
-            "TCP 服务端（引擎连我）",
-        ])
-        try:
-            self.engine_link_combo.setCurrentIndex(
-                int(self.cfg.get("engine_link_mode", 0)))
-        except (TypeError, ValueError):
-            self.engine_link_combo.setCurrentIndex(0)
-        self.engine_link_combo.currentIndexChanged.connect(self._on_link_mode_changed)
-        engine_form.addRow("连接方式:", self.engine_link_combo)
-
+        # 菜单「连接」里的三项：本地进程 / TCP 客户端 / TCP 服务端
         self.tcp_row_widget = QWidget()
         tcp_row = QHBoxLayout(self.tcp_row_widget)
         tcp_row.setContentsMargins(0, 0, 0, 0)
@@ -382,16 +396,10 @@ class SakuraGTPApp(QMainWindow):
         tcp_row.addWidget(QLabel("端口:"))
         tcp_row.addWidget(self.tcp_port_edit)
         engine_form.addRow("TCP 引擎:", self.tcp_row_widget)
-        self._on_link_mode_changed(self.engine_link_combo.currentIndex())
         self._tcp_engine_hint = ""
 
         engine_group.setLayout(engine_form)
         local_layout.addWidget(engine_group)
-
-        self.lbl_quick_hint = QLabel(
-            "三步开战：① 选引擎（或连接方式） ② 点「一键启动」 ③ 野狐客户端里选择 AI 接入")
-        self.lbl_quick_hint.setWordWrap(True)
-        local_layout.addWidget(self.lbl_quick_hint)
 
         local_btn_layout = QHBoxLayout()
         self.btn_start_engine = GlowButton("启动引擎")
@@ -660,6 +668,17 @@ class SakuraGTPApp(QMainWindow):
         self._gtp_hint_timer.timeout.connect(self._refresh_gtp_hint)
         self._gtp_hint_timer.start()
 
+        # 定期清屏：通信协议 / GTP 输出只保留最近一段，长时间挂机也不会越跑越卡
+        try:
+            minutes = int(self.cfg.get("log_auto_clear_minutes", 5) or 0)
+        except (TypeError, ValueError):
+            minutes = 5
+        self._log_trim_timer = QTimer(self)
+        if minutes > 0:
+            self._log_trim_timer.setInterval(minutes * 60 * 1000)
+            self._log_trim_timer.timeout.connect(self._auto_trim_logs)
+            self._log_trim_timer.start()
+
         board_tab = QWidget()
         board_layout = QVBoxLayout(board_tab)
         board_layout.setContentsMargins(4, 4, 4, 4)
@@ -804,7 +823,7 @@ class SakuraGTPApp(QMainWindow):
 
     def _start_engine_inner(self):
         # 连接方式优先：TCP 模式不需要本地引擎/权重路径
-        link_mode = self.engine_link_combo.currentIndex()
+        link_mode = self._link_mode
         host = self.tcp_host_edit.text().strip() or "127.0.0.1"
         try:
             port = int(self.tcp_port_edit.text())
@@ -999,8 +1018,21 @@ class SakuraGTPApp(QMainWindow):
             self._log_comm("自动重连失败: %s" % exc)
         self._stop_engine()
 
-    def _on_link_mode_changed(self, index):
-        self.tcp_row_widget.setVisible(index != 0)
+    def _set_link_mode(self, index, log=True):
+        """切换引擎连接方式（菜单「连接」三项之一）。"""
+        index = 0 if index is None else int(index)
+        if index not in (0, 1, 2):
+            index = 0
+        self._link_mode = index
+        self.cfg["engine_link_mode"] = index
+        save_config(self.cfg)
+        for i, act in enumerate(getattr(self, "link_actions", [])):
+            act.setChecked(i == index)
+        widget = getattr(self, "tcp_row_widget", None)
+        if widget is not None:
+            widget.setVisible(index != 0)
+        if log:
+            self._log_comm("连接方式: %s" % LINK_MODE_NAMES[index])
 
     def _quick_start(self):
         """一键启动：起引擎（按当前连接方式） + 监听野狐客户端。"""
@@ -1860,6 +1892,24 @@ class SakuraGTPApp(QMainWindow):
             cursor.movePosition(QTextCursor.Down, QTextCursor.KeepAnchor, drop)
             cursor.removeSelectedText()
 
+    def _auto_trim_logs(self, keep=800):
+        """定期清屏：通信协议和 GTP 输出都只保留最近 keep 段。"""
+        for name in ("comm_text", "gtp_text"):
+            widget = getattr(self, name, None)
+            if widget is not None:
+                self._trim_widget(widget, keep)
+
+    @staticmethod
+    def _trim_widget(widget, keep=800):
+        document = widget.document()
+        excess = document.blockCount() - keep
+        if excess <= 0:
+            return
+        cursor = QTextCursor(document)
+        cursor.movePosition(QTextCursor.Start)
+        cursor.movePosition(QTextCursor.Down, QTextCursor.KeepAnchor, excess)
+        cursor.removeSelectedText()
+
     def _clear_comm(self):
         self.comm_text.clear()
 
@@ -1872,7 +1922,7 @@ class SakuraGTPApp(QMainWindow):
     def _show_env_help(self):
         QMessageBox.information(
             self, "依赖环境",
-            "SakuraGTP 1.6.1 依赖环境\n\n"
+            "SakuraGTP 1.6.2 依赖环境\n\n"
             "Windows 10 / 11，64 位\n"
             "VC++ 2010 x86 / VC++ 2015-2022 x64\n"
             "AI 引擎 (KataGo / LeelaZero)\n"
@@ -1900,7 +1950,7 @@ class SakuraGTPApp(QMainWindow):
     def _show_about(self):
         QMessageBox.information(
             self, "关于",
-            "SakuraGTP 1.6.1\n野狐围棋 AI 连线器"
+            "SakuraGTP 1.6.2\n野狐围棋 AI 连线器"
         )
 
     # ============================================================ 关闭
