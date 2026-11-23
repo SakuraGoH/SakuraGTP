@@ -4,9 +4,20 @@ import os
 import sys
 import unittest
 
+import time
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+
+def wait_for(predicate, timeout=5.0):
+    end = time.time() + timeout
+    while time.time() < end:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return False
 
 from gtp_bridge import GTPBridge          # noqa: E402
 from mock_engine import MockEngine        # noqa: E402
@@ -53,7 +64,7 @@ class FoxSink:
         return [items for cmd, items in self.packets if cmd == command]
 
 
-def make_bridge(mode="katago", candidate_sink=None, **kwargs):
+def make_bridge(mode="katago", candidate_sink=None, on_restart_engine=None, **kwargs):
     mock = MockEngine(mode=mode)
     for key, value in kwargs.items():
         setattr(mock, key, value)
@@ -67,6 +78,7 @@ def make_bridge(mode="katago", candidate_sink=None, **kwargs):
         on_candidate=(candidate_sink.append if candidate_sink is not None
                       else (lambda c: None)),
         on_engine_raw=lambda line: None,
+        on_restart_engine=on_restart_engine,
     )
     mgr.on_output = bridge.on_engine_output
     bridge.on_engine_started(mode)
@@ -373,6 +385,52 @@ class BridgeTest(unittest.TestCase):
         self.bridge = bridge
         bridge.set_rules("japanese")
         self.assertTrue(mgr.mock.commands_named("kata-set-rules"))
+
+    # ------------------------------------------------------------------ 重连重放
+    def test_large_replay_is_chunked(self):
+        """断线重连补几十手时，必须分块发送并最终标记同步。"""
+        bridge, mgr, _sink, logs = make_bridge("katago")
+        self.bridge = bridge
+        bridge._replay_threshold = 5
+        bridge._replay_chunk = 10
+        bridge._replay_delay = 0.0
+        bridge._replay_ack_timeout = 2.0
+
+        bridge.handle_fox_command("FARULE", ["19", "60", "30", "5", "650"])
+        moves = []
+        for i in range(1, 26):
+            color = "B" if i % 2 else "W"
+            moves.append("%d^%d^%d^%s" % (i, i % 19, (i * 7) % 19, color))
+        bridge.handle_fox_command("FASTATUS", ["1", "B"] + moves)
+
+        self.assertTrue(wait_for(lambda: not bridge._replay_active, 10),
+                        "重放线程未在预期时间内结束")
+        self.assertTrue(wait_for(
+            lambda: bridge._engine_events == bridge._events, 5))
+        self.assertEqual(len(mgr.mock.plays()), 25)
+        self.assertTrue(any("重放" in m for m in logs), "应有重放进度日志")
+        self.assertFalse(bridge._dirty_engine)
+
+    def test_restart_after_game_invokes_callback(self):
+        calls = []
+        bridge, _mgr, _sink, logs = make_bridge(
+            "katago", on_restart_engine=lambda: calls.append(True))
+        self.bridge = bridge
+        bridge.set_restart_after_game(True)
+        bridge.handle_fox_command("FARULE", ["19", "60", "30", "5", "650"])
+        bridge.handle_fox_command("FARESULT", ["W+350"])
+        self.assertTrue(wait_for(lambda: calls, 5), "对局结束后应请求重启引擎")
+
+    def test_restart_after_game_disabled_does_nothing(self):
+        calls = []
+        bridge, _mgr, _sink, _logs = make_bridge(
+            "katago", on_restart_engine=lambda: calls.append(True))
+        self.bridge = bridge
+        bridge.set_restart_after_game(False)
+        bridge.handle_fox_command("FARULE", ["19", "60", "30", "5", "650"])
+        bridge.handle_fox_command("FARESULT", ["W+350"])
+        time.sleep(1.2)
+        self.assertEqual(calls, [])
 
 
 class ParseTest(unittest.TestCase):

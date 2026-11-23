@@ -213,6 +213,11 @@ class GTPSession:
                 return bool(self._pending)
             return any(p.purpose == purpose for p in self._pending)
 
+    def pending_count(self):
+        """当前还没收到回执的命令数（棋谱分块重放时用来做流控）。"""
+        with self._lock:
+            return len(self._pending)
+
     def complete_pending(self, purpose, body="", ok=True):
         """用一条「裸行」回答完成某类命令（KataGo analyze 的最终 play 行）。"""
         with self._lock:

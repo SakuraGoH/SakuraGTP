@@ -43,10 +43,11 @@ class SakuraGTPApp(QMainWindow):
     candidate_signal = pyqtSignal(list)
     board_signal = pyqtSignal()
     engine_exit_signal = pyqtSignal()
+    engine_restart_signal = pyqtSignal()
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("SakuraGTP 1.5.2 - 野狐围棋 AI 连线器")
+        self.setWindowTitle("SakuraGTP 1.5.3 - 野狐围棋 AI 连线器")
         self.resize(1800, 1000)
         self.setMinimumSize(1480, 860)
 
@@ -67,11 +68,13 @@ class SakuraGTPApp(QMainWindow):
             on_log=self._log_comm,
             on_candidate=self._on_candidate,
             on_engine_raw=self._on_engine_raw,
+            on_restart_engine=self._on_restart_engine_request,
         )
 
         self.winrate_window = None
         self._detached_view = None
         self.api_window = None
+        self._restarting_engine = False
 
         self.api_server = APIServer(self, on_log=self._log_comm)
         self.runner = ContributeRunner(on_log=self._log_comm)
@@ -483,6 +486,16 @@ class SakuraGTPApp(QMainWindow):
         self.winrate_param_widget.setVisible(True)
         live_layout.addWidget(self.winrate_param_widget)
 
+        # 每局结束重启引擎（清理长局积累的状态，避免引擎越用越慢/越界）
+        self.chk_restart_after_game = GlowCheckBox("每局结束后重启一次引擎")
+        self.chk_restart_after_game.setToolTip(
+            "对局结束后自动停止并重新启动 AI 引擎。\n"
+            "适合长时间挂机：避免引擎连续对局积累状态导致变慢或异常。")
+        self.chk_restart_after_game.setChecked(
+            bool(self.cfg.get("restart_engine_after_game", False)))
+        self.chk_restart_after_game.toggled.connect(self._on_restart_after_game_toggled)
+        live_layout.addWidget(self.chk_restart_after_game)
+
         live_group.setLayout(live_layout)
         layout.addWidget(live_group)
 
@@ -654,6 +667,7 @@ class SakuraGTPApp(QMainWindow):
         self.candidate_signal.connect(self._on_candidate)
         self.board_signal.connect(self._do_update_board)
         self.engine_exit_signal.connect(self._stop_engine)
+        self.engine_restart_signal.connect(self._restart_engine_after_game)
 
     # ============================================================ 模式切换 / 浏览
     def _switch_mode(self, mode):
@@ -1025,6 +1039,34 @@ class SakuraGTPApp(QMainWindow):
         self.bridge.set_rules(rule)
         self._log_gtp(f"已切换规则: {rule}")
 
+    # ============================================================ 每局结束重启引擎
+    def _on_restart_after_game_toggled(self, checked):
+        self.cfg["restart_engine_after_game"] = bool(checked)
+        save_config(self.cfg)
+        self.bridge.set_restart_after_game(bool(checked))
+        self._log_comm("每局结束重启引擎: %s" % ("开" if checked else "关"))
+
+    def _on_restart_engine_request(self):
+        """由 bridge 的后台线程调用：切回 GUI 线程执行真正的重启。"""
+        self.engine_restart_signal.emit()
+
+    def _restart_engine_after_game(self):
+        if self._restarting_engine:
+            return
+        if not self.engine.is_running():
+            return
+        self._restarting_engine = True
+        self._log_comm("对局结束：正在重启 AI 引擎…")
+        self._stop_engine()
+        # 稍等片刻让旧进程完全退出，再按当前界面配置重新启动
+        QTimer.singleShot(800, self._finish_engine_restart)
+
+    def _finish_engine_restart(self):
+        try:
+            self._start_engine()
+        finally:
+            self._restarting_engine = False
+
     def _on_fox_command(self, command, items):
         self._last_game_time = time.time()
         if self.cfg.get("contribute_stop_on_game", True):
@@ -1141,6 +1183,11 @@ class SakuraGTPApp(QMainWindow):
                 specify_ai_byoyomi=self.cfg.get("specify_ai_byoyomi", False),
                 ai_byoyomi_time=int(self.cfg.get("ai_byo_yomi_time", 5)),
             )
+        except Exception:
+            pass
+        try:
+            self.bridge.set_restart_after_game(
+                bool(self.cfg.get("restart_engine_after_game", False)))
         except Exception:
             pass
 
@@ -1696,7 +1743,7 @@ class SakuraGTPApp(QMainWindow):
     def _show_env_help(self):
         QMessageBox.information(
             self, "依赖环境",
-            "SakuraGTP 1.5.2 依赖环境\n\n"
+            "SakuraGTP 1.5.3 依赖环境\n\n"
             "Windows 10 / 11，64 位\n"
             "VC++ 2010 x86 / VC++ 2015-2022 x64\n"
             "AI 引擎 (KataGo / LeelaZero)\n"
@@ -1724,7 +1771,7 @@ class SakuraGTPApp(QMainWindow):
     def _show_about(self):
         QMessageBox.information(
             self, "关于",
-            "SakuraGTP 1.5.2\n野狐围棋 AI 连线器"
+            "SakuraGTP 1.5.3\n野狐围棋 AI 连线器"
         )
 
     # ============================================================ 关闭

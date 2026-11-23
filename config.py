@@ -52,7 +52,7 @@ DEFAULT_CONFIG = {
     "ssh_port": "22",
     "ssh_user": "",
     "ssh_cmd": "",
-    "version": "1.5.2",
+    "version": "1.5.3",
     # 心跳包
     "heartbeat_enabled": False,
     "heartbeat_interval": 30,         # 秒
@@ -65,6 +65,8 @@ DEFAULT_CONFIG = {
     # 断线重连
     "auto_reconnect": True,
     "reconnect_interval": 5,          # 秒
+    # 每局结束后重启一次引擎（清理引擎长局积累的状态/内存）
+    "restart_engine_after_game": False,
     # API Token
     "api_token_enabled": False,
     "api_token": "",
