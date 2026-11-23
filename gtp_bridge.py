@@ -155,7 +155,6 @@ class GTPBridge:
 
     def on_engine_stopped(self):
         self.session.reset("引擎停止")
-        self._cancel_replay()
         self._ready = False
         self._engine_events = []
         self._engine_handicap = []

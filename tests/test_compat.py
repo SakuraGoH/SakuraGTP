@@ -423,6 +423,15 @@ class BridgeTest(unittest.TestCase):
         self.assertGreater(min(gen_idx), max(play_idx),
                            "genmove 必须排在所有补子之后")
 
+    def test_engine_stopped_is_safe(self):
+        """停引擎时清理状态不能抛异常（曾因调用已删除方法把整个界面 abort 掉）。"""
+        bridge, _mgr, _sink, _logs = make_bridge("katago")
+        self.bridge = bridge
+        bridge.handle_fox_command("FARULE", ["19", "60", "30", "5", "650"])
+        bridge.on_engine_stopped()
+        self.assertFalse(bridge._ready)
+        self.assertEqual(bridge._engine_events, [])
+
     def test_restart_after_game_invokes_callback(self):
         calls = []
         bridge, _mgr, _sink, logs = make_bridge(

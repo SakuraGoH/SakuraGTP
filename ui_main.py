@@ -47,7 +47,7 @@ class SakuraGTPApp(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("SakuraGTP 1.5.4 - 野狐围棋 AI 连线器")
+        self.setWindowTitle("SakuraGTP 1.5.5 - 野狐围棋 AI 连线器")
         self.resize(1800, 1000)
         self.setMinimumSize(1480, 860)
 
@@ -749,6 +749,13 @@ class SakuraGTPApp(QMainWindow):
 
     # ============================================================ 引擎控制
     def _start_engine(self):
+        """按钮/定时器回调：任何异常都不能让 Qt 直接 abort 掉整个程序。"""
+        try:
+            self._start_engine_inner()
+        except Exception as exc:
+            self._log_comm("启动引擎时出错: %s" % exc)
+
+    def _start_engine_inner(self):
         engine_path = self.engine_combo.currentText().strip()
         weight_path = self.weight_combo.currentText().strip()
         config_path = self.config_combo.currentText().strip()
@@ -850,6 +857,13 @@ class SakuraGTPApp(QMainWindow):
         self.btn_mode_ssh.setEnabled(False)
 
     def _stop_engine(self):
+        """按钮/引擎退出回调：停引擎出错不能把连线器一起带走。"""
+        try:
+            self._stop_engine_inner()
+        except Exception as exc:
+            self._log_comm("停止引擎时出错: %s" % exc)
+
+    def _stop_engine_inner(self):
         if self.engine.is_running():
             self._log_comm("发送 GTP: quit")
         self.bridge.on_engine_stopped()
@@ -1057,13 +1071,18 @@ class SakuraGTPApp(QMainWindow):
             return
         self._restarting_engine = True
         self._log_comm("对局结束：正在重启 AI 引擎…")
-        self._stop_engine()
+        try:
+            self._stop_engine()
+        except Exception as exc:
+            self._log_comm("重启前停止引擎失败: %s" % exc)
         # 稍等片刻让旧进程完全退出，再按当前界面配置重新启动
         QTimer.singleShot(800, self._finish_engine_restart)
 
     def _finish_engine_restart(self):
         try:
             self._start_engine()
+        except Exception as exc:
+            self._log_comm("重启引擎失败: %s" % exc)
         finally:
             self._restarting_engine = False
 
@@ -1743,7 +1762,7 @@ class SakuraGTPApp(QMainWindow):
     def _show_env_help(self):
         QMessageBox.information(
             self, "依赖环境",
-            "SakuraGTP 1.5.4 依赖环境\n\n"
+            "SakuraGTP 1.5.5 依赖环境\n\n"
             "Windows 10 / 11，64 位\n"
             "VC++ 2010 x86 / VC++ 2015-2022 x64\n"
             "AI 引擎 (KataGo / LeelaZero)\n"
@@ -1771,7 +1790,7 @@ class SakuraGTPApp(QMainWindow):
     def _show_about(self):
         QMessageBox.information(
             self, "关于",
-            "SakuraGTP 1.5.4\n野狐围棋 AI 连线器"
+            "SakuraGTP 1.5.5\n野狐围棋 AI 连线器"
         )
 
     # ============================================================ 关闭
