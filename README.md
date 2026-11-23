@@ -46,6 +46,13 @@ Two useful config keys for byo-yomi translation (in `sakura_config.json`, matchi
 
 ---
 
+## Documentation
+
+- [SakuraGTP 使用手册（PDF）](docs/SakuraGTP使用手册.pdf) — 安装、三种引擎连接方式（stdio / TCP 客户端 / TCP 服务端）、SSH、野狐接入、时间与传输设置、故障排查。
+- [野狐围棋 AI 接入协议（补全版，PDF）](docs/野狐AI接入协议-补全版.pdf) — 实现级协议参考：报文与校验、12 条命令、时间模型、断线重连与棋谱重放，以及官方文档没有覆盖、但做完整连线器必须处理的细节。
+
+---
+
 ## Requirements
 
 - **Python**: 3.8 or later
