@@ -841,6 +841,9 @@ class GTPBridge:
                 self.log("引擎对 %s 返回错误: %r（已忽略）" % (cmd_name, resp.body))
                 if purpose == "boardsize":
                     self.log("该引擎可能不支持当前棋盘尺寸，请检查引擎设置")
+                elif purpose == "komi":
+                    self.log("引擎拒绝了该贴目：PhoenixGo 等引擎固定 7.5 目，"
+                             "请把野狐对局贴目设为引擎支持的值，或换用其他引擎")
             return
 
     def _finish_final_score(self, resp):

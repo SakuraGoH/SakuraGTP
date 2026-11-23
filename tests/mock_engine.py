@@ -46,6 +46,16 @@ class MockEngine:
             base += ["fixed_handicap"]
             self.NAME = "GNU Go"
             self.VERSION = "3.8"
+        elif mode == "phoenixgo":
+            # PhoenixGo 的真实 list_commands：没有 kata-*，没有 known_command，
+            # 不支持 komi 非 7.5，genmove 返回普通坐标。
+            base = ["name", "version", "protocol_version", "list_commands", "quit",
+                    "clear_board", "boardsize", "komi", "time_settings", "time_left",
+                    "place_free_handicap", "set_free_handicap", "play", "genmove",
+                    "final_score", "get_debug_info", "get_last_move_debug_info", "undo"]
+            self.NAME = "PhoenixGo"
+            self.VERSION = "1.0"
+            self.score_result = "W+0.5"
         self.commands = set(base)
         # 声称支持但实际会报错的命令（用于测试「探测被骗」后的回退）
         self.reject = set()
@@ -124,6 +134,9 @@ class MockEngine:
             self.komi = float(args)
         except ValueError:
             return self._respond(cid, "syntax error", ok=False)
+        if self.mode == "phoenixgo" and abs(self.komi - 7.5) > 1e-9:
+            # PhoenixGo 的贴目写死 7.5，其余值直接拒绝
+            return self._respond(cid, "unacceptable komi", ok=False)
         return self._respond(cid)
 
     def _cmd_time_settings(self, cid, args):

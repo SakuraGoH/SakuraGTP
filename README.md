@@ -32,7 +32,10 @@ SakuraGTP no longer assumes KataGo:
 |---|---|
 | KataGo | `kata-genmove_analyze`, `kata-set-param`, `kata-set-rules`, `final_score` (candidates + winrate kept) |
 | Leela Zero / GNU Go / Fuego / Pachi / others | core GTP only: `boardsize`, `komi`, `time_settings`, `time_left`, `play`, `genmove`, `final_score` |
+| PhoenixGo | core GTP only; no `kata-*` is sent. PhoenixGo has a fixed komi of 7.5 — other komi values are rejected by the engine and SakuraGTP logs a hint |
 | No `final_score` | Fox's `$AFSCORE` is answered with `error`, as the Fox protocol allows |
+
+PhoenixGo is verified end-to-end (MCTS + KataGo ONNX weights, `mcts_onnx_katago.conf`): protocol probe, replay, `genmove`, `final_score` and the komi warning are covered by `tests/manual_phoenixgo_e2e.py`.
 
 A from-scratch Python re-implementation of the official FoxGTP connector is available on the
 [`foxgtp-py`](https://github.com/SakuraGoH/SakuraGTP/tree/foxgtp-py) branch: same protocol

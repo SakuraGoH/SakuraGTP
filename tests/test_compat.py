@@ -114,6 +114,54 @@ class BridgeTest(unittest.TestCase):
         self.assertFalse(bridge.profile.kata)
         self.assertFalse(bridge.session.echoes_id)
 
+    # ------------------------------------------------------------------ PhoenixGo
+    def test_probe_phoenixgo(self):
+        bridge, _mgr, _sink, _logs = make_bridge("phoenixgo")
+        self.bridge = bridge
+        self.assertEqual(bridge.profile.family, "phoenixgo")
+        self.assertFalse(bridge.profile.kata)
+        self.assertTrue(bridge.profile.final_score)
+        self.assertTrue(bridge.profile.time_settings)
+
+    def test_phoenixgo_hint_with_katago_path_does_not_misfire(self):
+        """配置文件名里带 katago 时，不能把 PhoenixGo 误判成 KataGo。"""
+        bridge, _mgr, _sink, _logs = make_bridge("phoenixgo")
+        self.bridge = bridge
+        bridge.on_engine_started(r"C:\PhoenixGo\etc\mcts_onnx_katago.conf")
+        bridge._probe_thread.join(5.0)
+        self.assertEqual(bridge.profile.family, "phoenixgo")
+        self.assertFalse(bridge.profile.kata)
+
+    def test_phoenixgo_only_core_gtp(self):
+        bridge, mgr, _sink, _logs = make_bridge("phoenixgo")
+        self.bridge = bridge
+        bridge.handle_fox_command("FARULE", ["19", "600", "30", "5", "750"])
+        moves = ["%d^%d^%d^%s" % (i, (i - 1) // 19, (i - 1) % 19,
+                                  "B" if i % 2 else "W") for i in range(1, 11)]
+        bridge.handle_fox_command("FASTATUS", ["1", "B"] + moves)
+        bridge.handle_fox_command("FAMOVE", ["1", "W", "11^5^5^W"])
+
+        sent = [cmd for _cid, cmd in mgr.mock.received]
+        self.assertFalse([c for c in sent if c.startswith("kata-")],
+                         "非 KataGo 引擎不能收到 kata-* 命令")
+        self.assertTrue([c for c in sent if c.startswith("genmove")])
+        self.assertTrue(any(c == "komi 7.5" for c in sent))
+
+    def test_phoenixgo_komi_rejection_is_logged(self):
+        bridge, _mgr, _sink, logs = make_bridge("phoenixgo")
+        self.bridge = bridge
+        bridge.handle_fox_command("FARULE", ["19", "600", "30", "5", "650"])
+        self.assertTrue(any("贴目" in m and "7.5" in m for m in logs),
+                        "引擎拒绝贴目时应给出明确提示")
+
+    def test_phoenixgo_final_score(self):
+        bridge, _mgr, sink, _logs = make_bridge("phoenixgo")
+        self.bridge = bridge
+        bridge.handle_fox_command("FARULE", ["19", "600", "30", "5", "750"])
+        bridge.handle_fox_command("FASCORE", ["0"])
+        self.assertTrue(wait_for(lambda: sink.first("AFSCORE") is not None, 3))
+        self.assertEqual(sink.first("AFSCORE"), ("0", "W+50"))
+
     # ------------------------------------------------------------------ 开局设置
     def test_farule_setup(self):
         bridge, mgr, _sink, _logs = make_bridge("katago")

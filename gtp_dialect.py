@@ -120,6 +120,8 @@ class EngineProfile:
 
 def _family_from_text(text, hint=""):
     blob = ("%s %s" % (text or "", hint or "")).lower()
+    if "phoenix" in blob:
+        return "phoenixgo"
     if "katago" in blob or "kata-go" in blob:
         return "katago"
     if "leela" in blob or "leelaz" in blob or blob.strip().startswith("lz"):
@@ -184,7 +186,10 @@ def probe(session, hint="", timeout=1.0, first_resp=None):
             prof.commands = cmds
             prof.list_ok = True
 
-    prof.family = _family_from_text("%s %s" % (prof.name, prof.version), hint)
+    # 引擎自己报了名字就以名字为准；只有名字为空时才用调用方给的提示，
+    # 否则配置文件路径里的 "katago" 会把 PhoenixGo 之类误判成 KataGo。
+    prof.family = _family_from_text(
+        "%s %s" % (prof.name, prof.version), "" if prof.name else hint)
 
     # 回显判断：优先看 name（正文一定非数字），其次 list_commands
     detected = _detect_echo(name_resp)
