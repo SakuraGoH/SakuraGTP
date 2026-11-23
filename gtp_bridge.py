@@ -32,13 +32,14 @@ class GTPBridge:
     # 与 FoxGTP 对齐的命令用途（仅作日志可读性）
     def __init__(self, engine_manager, send_to_fox, on_log=None,
                  on_candidate=None, on_engine_raw=None,
-                 on_restart_engine=None):
+                 on_restart_engine=None, on_heartbeat_dead=None):
         self.engine = engine_manager
         self.send_to_fox = send_to_fox
         self.on_log = on_log
         self.on_candidate = on_candidate
         self.on_engine_raw = on_engine_raw
         self.on_restart_engine = on_restart_engine
+        self.on_heartbeat_dead = on_heartbeat_dead
 
         # ---- 对局状态（UI/API 会直接读这些属性，保持兼容） ----
         self.board_size = 19
@@ -98,6 +99,14 @@ class GTPBridge:
         self.restart_after_game = False
         self._last_restart_request = 0.0
 
+        # ---- 心跳（统一由桥接层发协议层心跳，避免和引擎层各发一套） ----
+        self._hb_enabled = False
+        self._hb_interval = 30
+        self._hb_timeout = 10
+        self._hb_thread = None
+        self._hb_gen = 0
+        self._last_engine_activity = 0.0
+
         self._lock = threading.RLock()
 
         self.session = GTPSession(
@@ -131,7 +140,57 @@ class GTPBridge:
 
     def on_engine_output(self, line):
         """引擎 stdout 的一行（由 EngineManager 的回调转进来）。"""
+        self._last_engine_activity = time.time()
         self.session.on_engine_line(line)
+
+    # ================================================================== 心跳
+    def set_heartbeat(self, enabled, interval=30, timeout=10):
+        """统一的 protocol_version 心跳：保活 + 假死检测。
+
+        以前引擎层和界面各有一套心跳设置，现在只保留这一套：
+        * 每隔 interval 秒发一条 ``protocol_version``；
+        * 引擎在 timeout 秒内没有任何输出 → 判定假死，交给界面处理
+          （TCP 方式自动重连，本地进程方式停掉引擎）。
+        """
+        self._hb_enabled = bool(enabled)
+        self._hb_interval = max(1, int(interval))
+        self._hb_timeout = max(1, int(timeout))
+        with self._lock:
+            self._hb_gen += 1
+            gen = self._hb_gen
+        self._hb_thread = None
+        if self._hb_enabled:
+            self._last_engine_activity = time.time()
+            self._hb_thread = threading.Thread(
+                target=self._heartbeat_loop, args=(gen,), daemon=True)
+            self._hb_thread.start()
+        self.log("心跳检测: %s（%d 秒一次，%d 秒超时）" % (
+            "开" if self._hb_enabled else "关", self._hb_interval, self._hb_timeout))
+
+    def _heartbeat_loop(self, gen):
+        while self._hb_enabled and gen == self._hb_gen:
+            time.sleep(self._hb_interval)
+            if not (self._hb_enabled and gen == self._hb_gen):
+                return
+            if not self.engine.is_running():
+                continue
+            sent_at = time.time()
+            self.session.send("protocol_version", "heartbeat")
+            deadline = sent_at + self._hb_timeout
+            while time.time() < deadline and gen == self._hb_gen:
+                if self._last_engine_activity >= sent_at:
+                    break
+                time.sleep(0.2)
+            if gen != self._hb_gen or not self._hb_enabled:
+                return
+            if self._last_engine_activity < sent_at:
+                self.log("心跳超时：%d 秒内引擎没有任何响应，判定假死"
+                         % self._hb_timeout)
+                if self.on_heartbeat_dead:
+                    try:
+                        self.on_heartbeat_dead()
+                    except Exception as exc:
+                        self.log("心跳超时处理失败: %s" % exc)
 
     # ================================================================== 引擎生命周期
     def on_engine_started(self, hint=""):
@@ -178,7 +237,7 @@ class GTPBridge:
                 self._sync_dialect()
             return
 
-        prof = probe(self.session, hint=hint, timeout=3.0)
+        prof = probe(self.session, hint=hint, timeout=3.0, first_resp=r)
         with self._lock:
             self.profile = prof
             self.session.echoes_id = prof.echoes_id

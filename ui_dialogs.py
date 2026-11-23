@@ -19,48 +19,8 @@ from config import save_config
 from sci_widgets import GlowButton, GlowLineEdit, GlowComboBox, GlowCheckBox
 
 
-# ---------- 心跳设置 ----------
-def open_heartbeat_dialog(app):
-    dlg = QDialog(app)
-    dlg.setWindowTitle("心跳设置")
-    dlg.resize(400, 200)
-
-    layout = QFormLayout(dlg)
-
-    chk = GlowCheckBox("启用心跳检测")
-    chk.setChecked(app.cfg.get("heartbeat_enabled", False))
-    layout.addRow("", chk)
-
-    interval_edit = GlowLineEdit(str(app.cfg.get("heartbeat_interval", 30)))
-    layout.addRow("心跳间隔（秒）:", interval_edit)
-
-    timeout_edit = GlowLineEdit(str(app.cfg.get("heartbeat_timeout", 10)))
-    layout.addRow("超时判定（秒）:", timeout_edit)
-
-    def on_save():
-        app.cfg["heartbeat_enabled"] = chk.isChecked()
-        try:
-            app.cfg["heartbeat_interval"] = int(interval_edit.text())
-        except ValueError:
-            app.cfg["heartbeat_interval"] = 30
-        try:
-            app.cfg["heartbeat_timeout"] = int(timeout_edit.text())
-        except ValueError:
-            app.cfg["heartbeat_timeout"] = 10
-        save_config(app.cfg)
-        app.engine.set_heartbeat(
-            app.cfg["heartbeat_enabled"],
-            app.cfg["heartbeat_interval"],
-            app.cfg["heartbeat_timeout"],
-        )
-        app._log_comm("心跳设置已保存")
-        dlg.accept()
-
-    btn = GlowButton("保存")
-    btn.clicked.connect(on_save)
-    layout.addRow("", btn)
-
-    dlg.exec_()
+# 心跳设置已并入「时间与传输设置」对话框（open_time_options_dialog），
+# 避免同一个配置项出现两个入口。
 
 
 # ---------- 断线重连设置 ----------
@@ -159,7 +119,7 @@ def open_time_options_dialog(app):
         app.cfg["heartbeat_timeout"] = max(1, _int_or(hb_timeout.text(), 10))
         save_config(app.cfg)
         app._apply_engine_params()
-        app.engine.set_heartbeat(
+        app.bridge.set_heartbeat(
             app.cfg["heartbeat_enabled"],
             app.cfg["heartbeat_interval"],
             app.cfg["heartbeat_timeout"],

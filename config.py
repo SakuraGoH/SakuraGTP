@@ -35,7 +35,6 @@ DEFAULT_CONFIG = {
     "data_transfer_time": 1,
     "specify_ai_byo_yomi": False,
     "ai_byo_yomi_time": 5,
-    "use_protocol_version_heartbeat": False,
     "engine_history": [],
     "weight_history": [],
     "config_history": [],
@@ -57,7 +56,7 @@ DEFAULT_CONFIG = {
     "ssh_port": "22",
     "ssh_user": "",
     "ssh_cmd": "",
-    "version": "1.6.0",
+    "version": "1.6.1",
     # 心跳包
     "heartbeat_enabled": False,
     "heartbeat_interval": 30,         # 秒

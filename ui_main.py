@@ -47,7 +47,7 @@ class SakuraGTPApp(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("SakuraGTP 1.6.0 - 野狐围棋 AI 连线器")
+        self.setWindowTitle("SakuraGTP 1.6.1 - 野狐围棋 AI 连线器")
         self.resize(1800, 1000)
         self.setMinimumSize(1480, 860)
 
@@ -71,6 +71,7 @@ class SakuraGTPApp(QMainWindow):
             on_candidate=self._on_candidate,
             on_engine_raw=self._on_engine_raw,
             on_restart_engine=self._on_restart_engine_request,
+            on_heartbeat_dead=self._on_engine_heartbeat_dead,
         )
 
         self.winrate_window = None
@@ -120,11 +121,11 @@ class SakuraGTPApp(QMainWindow):
         mode = self.cfg.get("engine_mode", "local")
         self._switch_mode(mode)
 
-        # 心跳
+        # 心跳（统一由桥接层发送 protocol_version）
         hb_enabled = self.cfg.get("heartbeat_enabled", False)
         hb_interval = self.cfg.get("heartbeat_interval", 30)
         hb_timeout = self.cfg.get("heartbeat_timeout", 10)
-        self.engine.set_heartbeat(hb_enabled, hb_interval, hb_timeout)
+        self.bridge.set_heartbeat(hb_enabled, hb_interval, hb_timeout)
 
         # 断线重连
         rc_enabled = self.cfg.get("auto_reconnect", True)
@@ -248,7 +249,6 @@ class SakuraGTPApp(QMainWindow):
         tools_menu.addAction("手动停止跑谱", self._manual_stop_contribute)
         tools_menu.addSeparator()
         tools_menu.addAction("时间与传输设置", self._open_time_options_dialog)
-        tools_menu.addAction("心跳设置", self._open_heartbeat_dialog)
         tools_menu.addAction("断线重连设置", self._open_reconnect_dialog)
         tools_menu.addAction("API Token 设置", self._open_token_dialog)
 
@@ -988,6 +988,17 @@ class SakuraGTPApp(QMainWindow):
         self._log_comm("引擎连接断开，等待自动重连…")
         self.bridge.on_engine_stopped()
 
+    def _on_engine_heartbeat_dead(self):
+        """心跳超时：TCP 方式自动重连，本地进程方式停掉引擎等用户重启。"""
+        self._log_comm("引擎心跳超时，判定假死")
+        try:
+            if self.engine.force_reconnect():
+                self._log_comm("TCP 引擎自动重连中…")
+                return
+        except Exception as exc:
+            self._log_comm("自动重连失败: %s" % exc)
+        self._stop_engine()
+
     def _on_link_mode_changed(self, index):
         self.tcp_row_widget.setVisible(index != 0)
 
@@ -1513,9 +1524,6 @@ class SakuraGTPApp(QMainWindow):
         save_config(self.cfg)
 
     # ============================================================ 工具菜单对话框
-    def _open_heartbeat_dialog(self):
-        ui_dialogs.open_heartbeat_dialog(self)
-
     def _open_time_options_dialog(self):
         ui_dialogs.open_time_options_dialog(self)
 
@@ -1864,7 +1872,7 @@ class SakuraGTPApp(QMainWindow):
     def _show_env_help(self):
         QMessageBox.information(
             self, "依赖环境",
-            "SakuraGTP 1.6.0 依赖环境\n\n"
+            "SakuraGTP 1.6.1 依赖环境\n\n"
             "Windows 10 / 11，64 位\n"
             "VC++ 2010 x86 / VC++ 2015-2022 x64\n"
             "AI 引擎 (KataGo / LeelaZero)\n"
@@ -1884,7 +1892,7 @@ class SakuraGTPApp(QMainWindow):
             "  AI 落子的同时实时显示选点、胜率、目差、计算量。\n\n"
             "工具菜单：\n"
             "  HTTP API：启动本地 API\n"
-            "  心跳设置：检测引擎假死\n"
+            "  时间与传输设置：读秒口径、数据传输时间、心跳检测\n"
             "  断线重连设置：野狐断开后自动等待重连\n"
             "  API Token 设置：保护 API 不被乱调"
         )
@@ -1892,7 +1900,7 @@ class SakuraGTPApp(QMainWindow):
     def _show_about(self):
         QMessageBox.information(
             self, "关于",
-            "SakuraGTP 1.6.0\n野狐围棋 AI 连线器"
+            "SakuraGTP 1.6.1\n野狐围棋 AI 连线器"
         )
 
     # ============================================================ 关闭

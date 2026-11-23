@@ -153,11 +153,16 @@ def _detect_echo(resp):
     return None
 
 
-def probe(session, hint="", timeout=1.0):
-    """探测引擎能力。必须保证此时命令队列是空的（刚启动时调用）。"""
+def probe(session, hint="", timeout=1.0, first_resp=None):
+    """探测引擎能力。必须保证此时命令队列是空的（刚启动时调用）。
+
+    ``first_resp`` 用来复用调用方已经拿到的 ``protocol_version`` 响应，
+    避免同一条命令发两次（日志里会出现两条 protocol_version）。
+    """
     prof = EngineProfile()
 
-    r = session.call("protocol_version", timeout=timeout)
+    r = first_resp if first_resp is not None else session.call(
+        "protocol_version", timeout=timeout)
     if r is not None:
         prof.probe_ok = True
         prof.version = (r.body or "").strip().split("\n")[0][:60]

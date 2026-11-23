@@ -56,19 +56,12 @@ class EngineManager:
         self._write_queue = queue.Queue()
         self._writer_thread = None
 
-        # 心跳
-        self.heartbeat_enabled = False
-        self.heartbeat_interval = 30
-        self.heartbeat_timeout = 10
-        self._last_heartbeat_reply = 0
-        self._heartbeat_thread = None
-        self._heartbeat_cmd_id = 0
-        self._hb_generation = 0
-
-    def set_heartbeat(self, enabled, interval=30, timeout=10):
-        self.heartbeat_enabled = bool(enabled)
-        self.heartbeat_interval = int(interval)
-        self.heartbeat_timeout = int(timeout)
+    def force_reconnect(self):
+        """心跳判定假死时由桥接层调用：TCP 模式下直接触发重连。"""
+        if self._mode.startswith("tcp") and self._sock is not None:
+            self._socket_lost()
+            return True
+        return False
 
     # ---------- 本地 / 远程命令行 ----------
     def build_command(self, engine_path, weight_path, config_path, extra_args=""):
@@ -132,7 +125,6 @@ class EngineManager:
                 self._reader_thread = threading.Thread(target=self._read_loop, daemon=True)
                 self._reader_thread.start()
                 self._start_writer()
-                self._start_heartbeat()
                 return True, f"启动成功: {cmd}"
             except Exception as e:
                 self.proc = None
@@ -150,9 +142,6 @@ class EngineManager:
                     break
                 text = line.decode("utf-8", errors="ignore").rstrip()
                 if text and self.on_output:
-                    # 心跳响应检测
-                    if "protocol_version" in text or text.strip().startswith("="):
-                        self._last_heartbeat_reply = time.time()
                     self.on_output(text)
         except Exception:
             pass
@@ -180,7 +169,6 @@ class EngineManager:
         self._running = True
         self._spawn_reader(sock)
         self._start_writer()
-        self._start_heartbeat()
         if self.on_connected:
             self.on_connected()
         return True, f"已连接 GTP 引擎 {host}:{port}"
@@ -232,7 +220,6 @@ class EngineManager:
             if self.on_output:
                 self.on_output(f">>> [连接] GTP 引擎已接入 {addr[0]}:{addr[1]}")
             self._start_writer()
-            self._start_heartbeat()
             self._spawn_reader(conn)
             if self.on_connected:
                 self.on_connected()
@@ -252,8 +239,6 @@ class EngineManager:
                     line, buffer = buffer.split(b"\n", 1)
                     text = line.decode("utf-8", errors="ignore").rstrip("\r")
                     if text and self.on_output:
-                        if "protocol_version" in text or text.strip().startswith("="):
-                            self._last_heartbeat_reply = time.time()
                         self.on_output(text)
             except OSError:
                 break
@@ -304,7 +289,6 @@ class EngineManager:
                 self.on_output(
                     f">>> [重连] 已重新连接 GTP 引擎 {self._tcp_host}:{self._tcp_port}")
             self._start_writer()
-            self._start_heartbeat()
             self._spawn_reader(sock)
             if self.on_connected:
                 self.on_connected()
@@ -316,53 +300,6 @@ class EngineManager:
 
     def is_listening(self):
         return self._running and self._server_sock is not None
-
-    # ---------- 心跳 ----------
-    def _start_heartbeat(self):
-        if not self.heartbeat_enabled:
-            return
-        self._hb_generation += 1
-        self._last_heartbeat_reply = time.time()
-        gen = self._hb_generation
-        self._heartbeat_thread = threading.Thread(
-            target=self._heartbeat_loop, args=(gen,), daemon=True
-        )
-        self._heartbeat_thread.start()
-
-    def _heartbeat_loop(self, gen):
-        # gen 保证旧引擎实例的心跳线程不会影响新实例
-        while self._running and gen == self._hb_generation:
-            time.sleep(self.heartbeat_interval)
-            if not (self._running and gen == self._hb_generation):
-                break
-            # 发心跳
-            self._heartbeat_cmd_id += 1
-            cid = self._heartbeat_cmd_id
-            hb_cmd = f"{cid} protocol_version"
-            try:
-                # 先记录到 GTP Shell
-                if self.on_output:
-                    self.on_output(f">>> [心跳] {hb_cmd}")
-                self.send(hb_cmd)
-            except Exception:
-                pass
-            # 等待响应
-            time.sleep(self.heartbeat_timeout)
-            if not (self._running and gen == self._hb_generation):
-                break
-            elapsed = time.time() - self._last_heartbeat_reply
-            if elapsed > self.heartbeat_timeout + 2:
-                # 超过 timeout+2 秒没响应，判定假死
-                if self.on_output:
-                    self.on_output(f"[心跳] 引擎无响应 {elapsed:.1f} 秒，判定假死")
-                if self._mode.startswith("tcp"):
-                    # TCP 模式按 FoxGTP 的做法自动重连，不用用户手动重启
-                    self._socket_lost()
-                else:
-                    if self.on_exit:
-                        self.on_exit()
-                    self.stop()
-                break
 
     # ---------- 内嵌 SSH ----------
     def start_ssh(self, host, port, username, password, key_file, command):
@@ -417,7 +354,6 @@ class EngineManager:
         self._reader_thread = threading.Thread(target=self._read_ssh_loop, daemon=True)
         self._reader_thread.start()
         self._start_writer()
-        self._start_heartbeat()
         return True, f"SSH 启动成功: {command}"
 
     def _read_ssh_loop(self):
@@ -436,8 +372,6 @@ class EngineManager:
                         line, buffer = buffer.split(b"\n", 1)
                         text = line.decode("utf-8", errors="ignore").rstrip("\r")
                         if text and self.on_output:
-                            if "protocol_version" in text or text.strip().startswith("="):
-                                self._last_heartbeat_reply = time.time()
                             self.on_output(text)
                 else:
                     time.sleep(0.01)
@@ -500,7 +434,6 @@ class EngineManager:
         with self._lock:
             was_running = self._running
             self._running = False
-            self._hb_generation += 1
             self._reconnect_gen += 1
             # 关掉 TCP 连接与监听
             sock, self._sock = self._sock, None

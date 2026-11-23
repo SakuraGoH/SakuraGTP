@@ -64,7 +64,8 @@ class FoxSink:
         return [items for cmd, items in self.packets if cmd == command]
 
 
-def make_bridge(mode="katago", candidate_sink=None, on_restart_engine=None, **kwargs):
+def make_bridge(mode="katago", candidate_sink=None, on_restart_engine=None,
+                on_heartbeat_dead=None, **kwargs):
     mock = MockEngine(mode=mode)
     for key, value in kwargs.items():
         setattr(mock, key, value)
@@ -79,6 +80,7 @@ def make_bridge(mode="katago", candidate_sink=None, on_restart_engine=None, **kw
                       else (lambda c: None)),
         on_engine_raw=lambda line: None,
         on_restart_engine=on_restart_engine,
+        on_heartbeat_dead=on_heartbeat_dead,
     )
     mgr.on_output = bridge.on_engine_output
     bridge.on_engine_started(mode)
@@ -492,6 +494,44 @@ class EngineWriteQueueTest(unittest.TestCase):
             manager._running = False
             if manager._writer_thread is not None:
                 manager._writer_thread.join(1.0)
+
+
+class HeartbeatTest(unittest.TestCase):
+    """心跳统一在桥接层：一套 protocol_version，不再和引擎层各发一套。"""
+
+    def tearDown(self):
+        if getattr(self, "bridge", None) is not None:
+            self.bridge.set_heartbeat(False)
+            self.bridge.session.stop()
+
+    def test_heartbeat_alive_engine_no_false_alarm(self):
+        calls = []
+        bridge, _mgr, _sink, _logs = make_bridge(
+            "katago", on_heartbeat_dead=lambda: calls.append(True))
+        self.bridge = bridge
+        bridge.set_heartbeat(True, 1, 1)
+        time.sleep(2.6)
+        self.assertEqual(calls, [], "引擎有响应时不能误判假死")
+
+    def test_heartbeat_dead_engine_fires_callback(self):
+        calls = []
+
+        class SilentEngine:
+            def __init__(self):
+                self.running = True
+
+            def send(self, _text):
+                return True
+
+            def is_running(self):
+                return True
+
+        bridge = GTPBridge(SilentEngine(), send_to_fox=lambda *a: True,
+                           on_log=lambda _m: None,
+                           on_heartbeat_dead=lambda: calls.append(True))
+        self.bridge = bridge
+        bridge.set_heartbeat(True, 1, 1)
+        self.assertTrue(wait_for(lambda: calls, 6), "无响应时应触发假死回调")
 
 
 class ParseTest(unittest.TestCase):
