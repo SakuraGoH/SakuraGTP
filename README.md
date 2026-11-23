@@ -148,16 +148,39 @@ Authorization: Bearer <your_token>
 
 ## Build
 
-```bash
-pyinstaller --onefile --windowed --name SakuraGTP ^
-    --add-data "SakuraGTP HTTP API 文档.md;." ^
-    --hidden-import=PyQt5 ^
-    --hidden-import=PIL ^
-    --hidden-import=paramiko ^
+Use the build script (recommended). It produces the portable `--onedir` package, which
+starts without extracting to `%TEMP%` — some machines reject that extraction with
+`Could not create temporary directory!`, so the single-file build is opt-in:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File build.ps1          # portable: dist\portable\SakuraGTP-vX.Y.Z\
+powershell -ExecutionPolicy Bypass -File build.ps1 -Sign    # build + Authenticode sign
+powershell -ExecutionPolicy Bypass -File build.ps1 -OneFile # single-file build (if %TEMP% is usable)
+```
+
+Manual equivalent for the portable build:
+
+```powershell
+pyinstaller --onedir --windowed --name SakuraGTP `
+    --add-data "sakura.ico;." `
+    --add-data "SakuraGTP HTTP API 文档.md;." `
+    --hidden-import=PyQt5 --hidden-import=PIL --hidden-import=paramiko `
     main.py
 ```
 
-The output is `dist/SakuraGTP.exe`.
+### Code signing
+
+`tools/` contains the release signing helpers:
+
+| Script | Purpose |
+| --- | --- |
+| `make_signing_cert.ps1` | Create the self-signed code-signing certificate (once per machine) |
+| `sign_release.ps1` | Sign an exe and verify the signature |
+| `install_cert.ps1` | Trust the certificate on another machine (fixes "unknown publisher") |
+| `fix_publisher_prompt.ps1` | Unblock a file and install trust in one step |
+
+The public certificate is `certs/SakuraGTP-CodeSigning.cer`; the private key (`.pfx`) is
+git-ignored and must never be committed. See `docs/代码签名与信任安装.md` for details.
 
 ---
 
