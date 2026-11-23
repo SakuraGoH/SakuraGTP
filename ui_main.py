@@ -47,7 +47,7 @@ class SakuraGTPApp(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("SakuraGTP 1.5.3 - 野狐围棋 AI 连线器")
+        self.setWindowTitle("SakuraGTP 1.5.4 - 野狐围棋 AI 连线器")
         self.resize(1800, 1000)
         self.setMinimumSize(1480, 860)
 
@@ -1743,7 +1743,7 @@ class SakuraGTPApp(QMainWindow):
     def _show_env_help(self):
         QMessageBox.information(
             self, "依赖环境",
-            "SakuraGTP 1.5.3 依赖环境\n\n"
+            "SakuraGTP 1.5.4 依赖环境\n\n"
             "Windows 10 / 11，64 位\n"
             "VC++ 2010 x86 / VC++ 2015-2022 x64\n"
             "AI 引擎 (KataGo / LeelaZero)\n"
@@ -1771,7 +1771,7 @@ class SakuraGTPApp(QMainWindow):
     def _show_about(self):
         QMessageBox.information(
             self, "关于",
-            "SakuraGTP 1.5.3\n野狐围棋 AI 连线器"
+            "SakuraGTP 1.5.4\n野狐围棋 AI 连线器"
         )
 
     # ============================================================ 关闭

@@ -91,23 +91,8 @@ class GTPBridge:
         self._game_configured = False    # 是否已经收到过 FARULE
         self._engine_setup_done = False  # 本局棋盘设置是否已下发给当前引擎
 
-        # ---- 棋谱重放（断线重连时可能一次要补几百手） ----
-        # 一次性往引擎 stdin 灌几百条 play 会把管道塞满（引擎正在思考时不读 stdin），
-        # Fox 读线程卡在 write 上 → 界面看起来「卡死」；部分引擎还会因此越界。
-        # 所以大补子改为后台线程分块发送，每块等引擎消化完再发下一块。
-        self._replay_threshold = 20      # 超过这么多手就走后台分块重放
-        self._replay_chunk = 40          # 每块多少手
-        self._replay_ack_timeout = 3.0   # 每块等待引擎回执的最长时间
-        self._replay_delay = 0.02        # 块与块之间的间隔
-        self._replay_gen = 0
-        self._replay_thread = None
-        self._replay_cancel = None
-        self._replay_active = False
-        self._replay_quiet = False
-        self._replay_send_lock = threading.Lock()
-        self._replay_lock = threading.Lock()
-        self._genmove_after_replay = False
-        self._genmove_defer_move_no = 0
+        # ---- 落子结果的新鲜度：重建/重放后，过期的 genmove 结果必须丢弃 ----
+        self._genmove_expected_no = 0
 
         # ---- 每局结束重启引擎 ----
         self.restart_after_game = False
@@ -139,16 +124,8 @@ class GTPBridge:
 
     def _on_line(self, line):
         if line.startswith(">>> "):
-            # 棋谱重放期间不逐条刷屏，只保留进度日志（否则一次重连几百行）
-            if self._replay_quiet:
-                return
             self.log("GTP发送: " + line[4:])
             return
-        if self._replay_quiet:
-            text = line.strip()
-            # 重放时只放行错误响应，正常的 =xx 回执不上日志
-            if not (text.startswith("?") or "error" in text.lower()):
-                return
         if self.on_engine_raw:
             self.on_engine_raw(line)
 
@@ -184,7 +161,6 @@ class GTPBridge:
         self._engine_handicap = []
         self._genmove_pending = False
         self._final_score_pending = False
-        self._genmove_after_replay = False
 
     def _probe_worker(self, hint):
         """等引擎就绪 → 探测方言。
@@ -303,8 +279,6 @@ class GTPBridge:
         if len(items) < 5:
             self.log("FARULE 字段不足，忽略")
             return
-        # 新对局：先停掉上一局可能还在跑的重放
-        self._cancel_replay()
         try:
             size = int(items[0])
             main_time = int(items[1])
@@ -509,12 +483,9 @@ class GTPBridge:
     # ---------------------------------------------------------------- FARESULT
     def _handle_faresult(self, items):
         self.log("对局结果: %s" % (items,))
-        # 先取消可能还在跑的重放，避免旧的 play 排在 clear_board 之后
-        self._cancel_replay()
         with self._lock:
             self._genmove_pending = False
             self._final_score_pending = False
-            self._genmove_after_replay = False
             self._candidates = {}
             self._candidates_dirty = False
         self._clear_candidates()
@@ -529,8 +500,7 @@ class GTPBridge:
             self._dirty_engine = True
         # 局末清盘（FoxGTP 2.6 加的同样处理，防止引擎把上一局残局带进下一局）
         if self.engine.is_running():
-            with self._replay_send_lock:
-                self.session.send("clear_board", "clear_board")
+            self.session.send("clear_board", "clear_board")
         # 「每局结束重启引擎」：交给界面层执行（界面才知道启动命令/按钮状态）
         self._maybe_request_engine_restart()
 
@@ -573,17 +543,13 @@ class GTPBridge:
 
     # ================================================================== 引擎同步
     def _setup_engine(self):
-        """(重新)下发棋盘设置。命令顺序与 FoxGTP 一致。
-
-        与重放共用发送锁，保证 clear_board 不会插到某批 play 中间。
-        """
+        """(重新)下发棋盘设置。命令顺序与 FoxGTP 一致。"""
         if not self.engine.is_running():
             return
         cmds = self.dialect.setup_commands(
             self.board_size, self.komi, self._handicap_vertices, self.rule)
-        with self._replay_send_lock:
-            for cmd in cmds:
-                self.session.send(cmd, cmd.split(" ")[0])
+        for cmd in cmds:
+            self.session.send(cmd, cmd.split(" ")[0])
         with self._lock:
             self._engine_events = []
             self._engine_handicap = list(self._handicap_vertices)
@@ -591,190 +557,80 @@ class GTPBridge:
             self._dirty_engine = False
 
     def _sync_engine(self, force_full=False):
-        """把野狐棋谱同步到引擎。
+        """把野狐棋谱同步到引擎（照 FoxGTP 的做法）。
 
-        正常行棋每步只差 1 手，走同步快路径；
-        断线重连 / 换引擎 / 手数错乱时可能要补几十上百手，走后台分块重放——
-        一次性灌满引擎 stdin 管道会让 Fox 读线程卡在 write 上（界面假死），
-        部分引擎还会因为瞬间涌入大量 play 出现越界访问。
+        * 引擎棋谱是野狐棋谱的前缀 → 只补后面的差异手；
+        * 对不上（断线重连 / 换引擎 / 手数错乱）→ clear_board + 全量重放。
+        所有 ``play`` 一次性交给引擎发送队列（顺序不变），调用方随后立刻发
+        genmove 继续落子，不等待引擎回执——引擎自己会按顺序消化，
+        这就是 FoxGTP 在断线重连时也能马上接着下的原因。
         """
         if not self.engine.is_running():
             return
         with self._lock:
             events = list(self._events)
             eng = list(self._engine_events)
-            setup_done = self._engine_setup_done
-            dirty = self._dirty_engine or force_full or not setup_done
+            dirty = self._dirty_engine or force_full or not self._engine_setup_done
 
         if dirty:
-            self._replay_dispatch(events, rebuild=True)
+            self._rebuild_engine(events)
             return
 
         n = 0
         while n < len(events) and n < len(eng) and events[n] == eng[n]:
             n += 1
         if n < len(eng):
+            # 同一个位置记录不一致 → 引擎局面不可信，整盘重建
             self.log("引擎棋谱与野狐棋谱不一致（第 %d 手），整盘重建" % (n + 1))
-            self._replay_dispatch(events, rebuild=True)
+            self._rebuild_engine(events)
             return
         if n == len(events):
             return
 
         pending = events[n:]
-        if len(pending) > self._replay_threshold:
-            self._replay_dispatch(events, rebuild=False, start=n)
-            return
-
-        # 少量补子：直接发，保持正常对局的低延迟
-        with self._replay_send_lock:
-            for color, vertex in pending:
-                self.session.send(self.dialect.play_command(color, vertex), "play")
-                self.log("同步落子: %s %s" % (color, vertex))
+        paused = False
+        if len(pending) > 20 and self._can_pause_pondering():
+            # KataGo 开着 pondering 时，每条 play 都要打断一次后台搜索，
+            # 补 300 手会变成几分钟、genmove 迟迟轮不到。重放期间临时关掉，
+            # 发完立刻恢复——顺序仍是「全部 play → genmove」。
+            self._set_pondering(False)
+            paused = True
+        for color, vertex in pending:
+            self.session.send(self.dialect.play_command(color, vertex), "play")
+            self.log("同步落子: %s %s" % (color, vertex))
+        if paused:
+            self._set_pondering(True)
         with self._lock:
             self._engine_events = events
 
-    # ---------------------------------------------------------------- 重放调度
-    def _replay_dispatch(self, events, rebuild, start=0):
-        """小局面同步重放；大局面交给后台线程分块重放。"""
-        todo = list(events) if rebuild else list(events[start:])
-        if len(todo) <= self._replay_threshold and not self._replay_active:
-            self._replay_sync(events, rebuild, start)
-            return
+    def _can_pause_pondering(self):
+        return "kata-set-param" in self.profile.commands
 
-        with self._replay_lock:
-            self._replay_gen += 1
-            gen = self._replay_gen
-            if self._replay_cancel is not None:
-                self._replay_cancel.set()
-            cancel = threading.Event()
-            self._replay_cancel = cancel
-            self._replay_active = True
-        self._replay_thread = threading.Thread(
-            target=self._replay_worker,
-            args=(gen, list(events), bool(rebuild), int(start), cancel),
-            daemon=True)
-        self._replay_thread.start()
-
-    def _replay_sync(self, events, rebuild, start=0):
-        """同步重放（只用于小局面，避免引入异步复杂度）。"""
-        self._stop_search_for_replay()
-        if rebuild or not self._engine_setup_done:
-            self._setup_engine()
-        chunk = events if rebuild else events[start:]
-        with self._replay_send_lock:
-            for color, vertex in chunk:
-                self.session.send(self.dialect.play_command(color, vertex), "play")
-                self.log("同步落子: %s %s" % (color, vertex))
-        with self._lock:
-            self._engine_events = list(events)
-            self._dirty_engine = False
-
-    def _cancel_replay(self):
-        """取消当前重放（开新局 / 对局结束 / 引擎断开时调用）。"""
-        with self._replay_lock:
-            self._replay_gen += 1
-            if self._replay_cancel is not None:
-                self._replay_cancel.set()
-                self._replay_cancel = None
-            self._replay_active = False
-            self._replay_quiet = False
-
-    def _stop_search_for_replay(self):
-        """重放前停掉正在进行的搜索。
-
-        否则 play 命令会排在搜索后面，有的引擎在搜索中途读到大量落子会状态错乱
-        （甚至越界访问）。这里直接放弃这次搜索的结果，绝不把过期落子发给野狐。
-        """
-        with self._lock:
-            was_pending = self._genmove_pending
-            self._genmove_pending = False
-            self._final_score_pending = False
-        self.session.streaming = False
-        if not was_pending:
-            return
-        stop_cmd = self.dialect.stop_command()
-        if stop_cmd:
-            self.session.send(stop_cmd, "stop")
-            self.log("重放前先停止引擎搜索")
-        deadline = time.time() + 3.0
-        while time.time() < deadline and self.session.pending_count() > 0:
-            if not self.engine.is_running():
-                return
-            time.sleep(0.02)
-
-    def _wait_pending_drain(self, gen, cancel, timeout):
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            if gen != self._replay_gen or cancel.is_set() or not self.engine.is_running():
-                return False
-            if self.session.pending_count() == 0:
-                return True
-            time.sleep(0.02)
-        return False
-
-    def _replay_worker(self, gen, events, rebuild, start, cancel):
-        self._replay_quiet = True
-        total = len(events)
-        chunk_size = max(1, int(self._replay_chunk))
-        try:
-            self.log("开始重放棋谱：%d 手（每 %d 手一批，等引擎消化后再发）"
-                     % (total, chunk_size))
-            self._stop_search_for_replay()
-            if rebuild or not self._engine_setup_done:
-                self._setup_engine()
-
-            sent = 0 if rebuild else min(start, total)
-            while sent < total:
-                if gen != self._replay_gen or cancel.is_set() or not self.engine.is_running():
-                    with self._lock:
-                        self._dirty_engine = True
-                    return
-                chunk = events[sent:sent + chunk_size]
-                with self._replay_send_lock:
-                    if gen != self._replay_gen or cancel.is_set():
-                        with self._lock:
-                            self._dirty_engine = True
-                        return
-                    for color, vertex in chunk:
-                        self.session.send(self.dialect.play_command(color, vertex), "play")
-                sent += len(chunk)
-                self._wait_pending_drain(gen, cancel, self._replay_ack_timeout)
-                if sent % (chunk_size * 2) == 0 or sent >= total:
-                    self.log("棋谱重放进度：%d/%d 手" % (sent, total))
-                time.sleep(self._replay_delay)
-
-            if gen == self._replay_gen and not cancel.is_set():
-                with self._lock:
-                    self._engine_events = list(events)
-                    self._dirty_engine = False
-                self.log("棋谱重放完成：%d 手" % total)
-            else:
-                with self._lock:
-                    self._dirty_engine = True
-        except Exception as exc:
-            self.log("重放异常：%s" % exc)
-            with self._lock:
-                self._dirty_engine = True
-        finally:
-            if gen == self._replay_gen:
-                self._replay_quiet = False
-                self._replay_active = False
-                if self._genmove_after_replay:
-                    self._genmove_after_replay = False
-                    # 只有在局面没变的前提下才补发；否则野狐已经走过棋了
-                    if self.last_move_number == self._genmove_defer_move_no:
-                        self._ensure_genmove()
-                    else:
-                        self.log("重放期间局面已变化，取消排队的落子请求")
+    def _set_pondering(self, enabled):
+        self.session.send("kata-set-param ponderingEnabled %s"
+                          % ("true" if enabled else "false"), "param")
 
     def _rebuild_engine(self, events=None):
-        """兼容旧接口：整盘重建（大局面会自动转后台分块）。"""
+        """整套重建：clear_board + 棋盘设置 + 全部落子（与 FoxGTP 一致）。"""
         if not self.engine.is_running():
             return
         if events is None:
             with self._lock:
                 events = list(self._events)
-        self._replay_dispatch(list(events), rebuild=True)
+        self.log("重建引擎局面：%d 手" % len(events))
+        self._setup_engine()
+        paused = False
+        if len(events) > 20 and self._can_pause_pondering():
+            self._set_pondering(False)
+            paused = True
+        for color, vertex in events:
+            self.session.send(self.dialect.play_command(color, vertex), "play")
+        if paused:
+            self._set_pondering(True)
+        with self._lock:
+            self._engine_events = list(events)
+            self._engine_handicap = list(self._handicap_vertices)
+            self._dirty_engine = False
 
     # ================================================================== 思考
     def _ensure_genmove(self):
@@ -782,12 +638,6 @@ class GTPBridge:
             self.log("引擎未运行，无法请求落子（等引擎恢复后野狐会重发）")
             return
         with self._lock:
-            if self._replay_active:
-                # 棋谱还在分块重放：等重放完再算，避免 play 和 genmove 抢管道
-                self._genmove_after_replay = True
-                self._genmove_defer_move_no = self.last_move_number
-                self.log("棋谱重放尚未完成，落子请求已排队")
-                return
             if self._genmove_pending:
                 self.log("上一次 genmove 尚未返回，跳过本次请求")
                 return
@@ -795,6 +645,8 @@ class GTPBridge:
             self._genmove_started = time.time()
             self._genmove_tries = 1
             self._analyzing = True
+            # 记下这次请求对应的手数：返回时局面若已变化，结果作废
+            self._genmove_expected_no = self.last_move_number
         self._clear_candidates()
         self._send_genmove()
 
@@ -828,8 +680,17 @@ class GTPBridge:
                 return
             self._genmove_pending = False
             self._analyzing = False
+            expected_no = self._genmove_expected_no
+            current_no = self.last_move_number
         self.session.streaming = False
         self._clear_candidates()
+
+        if current_no != expected_no:
+            # 断线重连补子 / 对手已走：这盘棋已经变了，搜索结果作废，
+            # 绝不能把基于旧局面的落子发给野狐（FoxGTP 同样按手数丢弃）。
+            self.log("genmove 返回时局面已变化（请求第 %d 手，当前第 %d 手），丢弃本次结果"
+                     % (expected_no, current_no))
+            return
 
         kind, vertex = self.dialect.parse_genmove(resp.body)
         if kind is None:
@@ -914,10 +775,6 @@ class GTPBridge:
                 self.log("引擎拒绝落子: %r → 标记局面重建" % resp.body)
                 with self._lock:
                     self._dirty_engine = True
-                if self._replay_active:
-                    # 重放中遇到非法落子，立刻停下，别继续灌命令
-                    self.log("重放过程中引擎拒绝落子，已中止本次重放")
-                    self._cancel_replay()
             return
         if purpose in ("setup", "clear_board", "boardsize", "komi",
                        "time_settings", "set_free_handicap", "time_left", "rules", "param"):

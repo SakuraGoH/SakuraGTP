@@ -1,4 +1,5 @@
 import os
+import queue
 import signal
 import subprocess
 import threading
@@ -33,6 +34,12 @@ class EngineManager:
         self._lock = threading.Lock()
         self._remote_mode = False
         self._ssh_mode = False
+
+        # 引擎写队列：send() 只入队，真正写 stdin 在独立线程里做。
+        # 这样断线重连时一次补几百手也不会把 Fox 读线程卡在管道写满上，
+        # 命令顺序与 FoxGTP 一致（先全部 play，随后立刻 genmove）。
+        self._write_queue = queue.Queue()
+        self._writer_thread = None
 
         # 心跳
         self.heartbeat_enabled = False
@@ -108,6 +115,7 @@ class EngineManager:
                 self._running = True
                 self._reader_thread = threading.Thread(target=self._read_loop, daemon=True)
                 self._reader_thread.start()
+                self._start_writer()
                 self._start_heartbeat()
                 return True, f"启动成功: {cmd}"
             except Exception as e:
@@ -231,6 +239,7 @@ class EngineManager:
         self._remote_mode = False
         self._reader_thread = threading.Thread(target=self._read_ssh_loop, daemon=True)
         self._reader_thread.start()
+        self._start_writer()
         self._start_heartbeat()
         return True, f"SSH 启动成功: {command}"
 
@@ -262,26 +271,48 @@ class EngineManager:
         if self.on_exit:
             self.on_exit()
 
-    def send(self, text):
-        with self._lock:
-            if self._ssh_mode and self._ssh_channel:
-                try:
-                    if not text.endswith("\n"):
-                        text += "\n"
-                    self._ssh_channel.send(text.encode("utf-8"))
-                    return True
-                except Exception:
-                    return False
-            if not self.proc or self.proc.poll() is not None:
-                return False
+    # ---------- 写线程 ----------
+    def _start_writer(self):
+        if self._writer_thread is not None and self._writer_thread.is_alive():
+            return
+        self._writer_thread = threading.Thread(target=self._write_loop, daemon=True)
+        self._writer_thread.start()
+
+    def _write_loop(self):
+        while True:
+            text = self._write_queue.get()
+            if text is None:
+                break
             try:
-                if not text.endswith("\n"):
-                    text += "\n"
-                self.proc.stdin.write(text.encode("utf-8"))
-                self.proc.stdin.flush()
-                return True
+                if self._ssh_mode and self._ssh_channel:
+                    self._ssh_channel.send(text.encode("utf-8"))
+                elif self.proc and self.proc.poll() is None and self.proc.stdin:
+                    self.proc.stdin.write(text.encode("utf-8"))
+                    self.proc.stdin.flush()
             except Exception:
+                # 引擎已退出/管道断开：丢掉这条，继续等后续命令或退出信号
+                continue
+
+    def _drain_writes(self):
+        try:
+            while True:
+                self._write_queue.get_nowait()
+        except queue.Empty:
+            return
+
+    def send(self, text):
+        """把一行 GTP 命令放进发送队列（立即返回，绝不在调用线程里等管道）。"""
+        if not text.endswith("\n"):
+            text += "\n"
+        if self._ssh_mode:
+            if not self._ssh_channel or self._ssh_channel.closed:
                 return False
+            self._write_queue.put(text)
+            return True
+        if not self.proc or self.proc.poll() is not None:
+            return False
+        self._write_queue.put(text)
+        return True
 
     def stop(self):
         with self._lock:
@@ -309,13 +340,13 @@ class EngineManager:
                     self.ssh_client = None
                 self._ssh_mode = False
             if self.proc:
-                # 先发 GTP quit，让引擎自然退出
+                # 先清掉未发送的积压命令，再发 GTP quit，让引擎自然退出
                 try:
                     if self.proc.stdin and self.proc.poll() is None:
                         if self.on_output:
                             self.on_output(">>> [停止] quit")
-                        self.proc.stdin.write(b"quit\n")
-                        self.proc.stdin.flush()
+                        self._drain_writes()
+                        self._write_queue.put("quit\n")
                 except Exception:
                     pass
                 # 给引擎最多 2 秒自然退出
@@ -337,6 +368,11 @@ class EngineManager:
                     except Exception:
                         pass
                 self.proc = None
+            # 通知写线程退出
+            self._write_queue.put(None)
+            if self._writer_thread is not None:
+                self._writer_thread.join(1.0)
+                self._writer_thread = None
         return True
 
     def is_running(self):

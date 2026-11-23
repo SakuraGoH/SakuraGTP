@@ -59,8 +59,8 @@ def build_moves(count):
 
 def main():
     workdir = os.path.join(ROOT, "_re", "replay_probe")
-    os.makedirs(os.path.join(workdir, "gtp_logs"), exist_ok=True)
-    os.makedirs(os.path.join(workdir, "katago_ov_cache"), exist_ok=True)
+    for sub in ("gtp_logs", "katago_ov_cache", "logs", "ovcache"):
+        os.makedirs(os.path.join(workdir, sub), exist_ok=True)
 
     logs = []
     sink = Sink()
@@ -78,31 +78,31 @@ def main():
     print("profile:", bridge.profile.summary())
 
     bridge.handle_fox_command("FARULE", ["19", "60", "30", "5", "650"])
-    moves = build_moves(120)
-
+    bridge.set_max_time(2)              # 让 genmove 快点结束，便于验证
+    bridge.set_max_visits(0)
+    moves = build_moves(40)
     t0 = time.time()
     bridge.handle_fox_command("FASTATUS", ["1", "B"] + moves)
     handler_ms = (time.time() - t0) * 1000.0
     print("FARULE/FASTATUS handler returned in %.1f ms (must be << 1s)" % handler_ms)
-    print("replay active:", bridge._replay_active)
 
-    if not wait_for(lambda: not bridge._replay_active, 180, "replay finished"):
-        return 3
     if not wait_for(lambda: bridge._engine_events == bridge._events, 10, "synced"):
         return 4
 
-    print("replay done: events=%d engine_events=%d engine_running=%s"
+    print("replay queued: events=%d engine_events=%d engine_running=%s"
           % (len(bridge._events), len(bridge._engine_events), manager.is_running()))
-    for line in logs:
-        if "重放" in line:
-            print("  log:", line)
 
-    # 重放后引擎仍应正常工作：请求一次点目
-    bridge.handle_fox_command("FASCORE", ["0"])
-    if wait_for(lambda: any(p[0] == "AFSCORE" for p in sink.packets), 120, "AFSCORE"):
-        print("AFSCORE:", [p for p in sink.packets if p[0] == "AFSCORE"][-1])
+    # 补子之后立刻请求落子，验证引擎会按顺序处理完补子再算，并且能正常回手
+    t0 = time.time()
+    bridge.handle_fox_command("FAMOVE", ["1", "W", "41^18^18^W"])
+    if wait_for(lambda: any(p[0] == "AFPLAY" for p in sink.packets), 180, "AFPLAY"):
+        move = [p for p in sink.packets if p[0] == "AFPLAY"][-1]
+        print("genmove after replay: %s (%.1fs)" % (move, time.time() - t0))
     else:
-        print("AFSCORE timeout (engine may still be busy)")
+        print("genmove timeout; engine_running=%s" % manager.is_running())
+        for line in logs[-25:]:
+            print("  log:", line)
+        return 5
 
     manager.stop()
     print("done")

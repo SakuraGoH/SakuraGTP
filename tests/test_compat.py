@@ -387,29 +387,41 @@ class BridgeTest(unittest.TestCase):
         self.assertTrue(mgr.mock.commands_named("kata-set-rules"))
 
     # ------------------------------------------------------------------ 重连重放
-    def test_large_replay_is_chunked(self):
-        """断线重连补几十手时，必须分块发送并最终标记同步。"""
+    def test_large_replay_sent_immediately(self):
+        """断线重连补 120 手：直接全部入队，不等回执、不阻塞 Fox 线程。"""
         bridge, mgr, _sink, logs = make_bridge("katago")
         self.bridge = bridge
-        bridge._replay_threshold = 5
-        bridge._replay_chunk = 10
-        bridge._replay_delay = 0.0
-        bridge._replay_ack_timeout = 2.0
-
         bridge.handle_fox_command("FARULE", ["19", "60", "30", "5", "650"])
-        moves = []
-        for i in range(1, 26):
-            color = "B" if i % 2 else "W"
-            moves.append("%d^%d^%d^%s" % (i, i % 19, (i * 7) % 19, color))
-        bridge.handle_fox_command("FASTATUS", ["1", "B"] + moves)
+        moves = ["%d^%d^%d^%s" % (i, i % 19, (i * 7) % 19, "B" if i % 2 else "W")
+                 for i in range(1, 121)]
 
-        self.assertTrue(wait_for(lambda: not bridge._replay_active, 10),
-                        "重放线程未在预期时间内结束")
-        self.assertTrue(wait_for(
-            lambda: bridge._engine_events == bridge._events, 5))
-        self.assertEqual(len(mgr.mock.plays()), 25)
-        self.assertTrue(any("重放" in m for m in logs), "应有重放进度日志")
+        t0 = time.time()
+        bridge.handle_fox_command("FASTATUS", ["1", "B"] + moves)
+        elapsed = time.time() - t0
+
+        self.assertLess(elapsed, 1.0, "重放必须在 Fox 线程里瞬间完成")
+        self.assertEqual(len(mgr.mock.plays()), 120)
+        self.assertEqual(bridge._engine_events, bridge._events)
         self.assertFalse(bridge._dirty_engine)
+
+    def test_genmove_follows_replay_immediately(self):
+        """补子后立刻发 genmove，且顺序在所有 play 之后。"""
+        bridge, mgr, _sink, _logs = make_bridge("katago")
+        self.bridge = bridge
+        bridge.handle_fox_command("FARULE", ["19", "60", "30", "5", "650"])
+        moves = ["%d^%d^%d^%s" % (i, i % 19, (i * 7) % 19, "B" if i % 2 else "W")
+                 for i in range(1, 41)]
+        bridge.handle_fox_command("FASTATUS", ["1", "B"] + moves)
+        # 轮到 AI 走第 41 手
+        bridge.handle_fox_command("FAMOVE", ["1", "W", "41^5^5^W"])
+
+        received = [cmd for _cid, cmd in mgr.mock.received]
+        play_idx = [i for i, c in enumerate(received) if c.startswith("play ")]
+        gen_idx = [i for i, c in enumerate(received)
+                   if "genmove" in c.split(" ")[0] or "genmove_analyze" in c]
+        self.assertTrue(gen_idx, "应立刻发出 genmove")
+        self.assertGreater(min(gen_idx), max(play_idx),
+                           "genmove 必须排在所有补子之后")
 
     def test_restart_after_game_invokes_callback(self):
         calls = []
@@ -431,6 +443,46 @@ class BridgeTest(unittest.TestCase):
         bridge.handle_fox_command("FARESULT", ["W+350"])
         time.sleep(1.2)
         self.assertEqual(calls, [])
+
+
+class EngineWriteQueueTest(unittest.TestCase):
+    """send() 必须立即返回：真正写管道在后台线程完成。
+
+    断线重连时 FoxGTP 式的一次性补几百手，靠的就是这一点不会卡住 Fox 线程。
+    """
+
+    def test_send_never_blocks_on_full_pipe(self):
+        from engine_manager import EngineManager
+
+        class SlowStdin:
+            def write(self, _data):
+                time.sleep(0.02)
+
+            def flush(self):
+                pass
+
+        class DummyProc:
+            stdin = SlowStdin()
+
+            def poll(self):
+                return None
+
+        manager = EngineManager()
+        manager.proc = DummyProc()
+        manager._running = True
+        manager._start_writer()
+        try:
+            start = time.time()
+            for i in range(100):
+                manager.send("play B Q%d" % (i % 19))
+            elapsed = time.time() - start
+            self.assertLess(elapsed, 0.5, "send() 不能等管道，必须毫秒级返回")
+        finally:
+            manager._drain_writes()
+            manager._write_queue.put(None)
+            manager._running = False
+            if manager._writer_thread is not None:
+                manager._writer_thread.join(1.0)
 
 
 class ParseTest(unittest.TestCase):
