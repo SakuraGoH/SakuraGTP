@@ -18,6 +18,7 @@ DEFAULT_CONFIG = {
     "config_path": "",
     "engine_args": "",
     "comm_cmd": "",
+    "comm_cmd_history": [],
     "engine_mode": "local",
     "background_image": "",
     "fox_listen_port": 6000,
@@ -57,7 +58,7 @@ DEFAULT_CONFIG = {
     "ssh_port": "22",
     "ssh_user": "",
     "ssh_cmd": "",
-    "version": "1.6.6",
+    "version": "1.6.7",
     # 心跳包
     "heartbeat_enabled": False,
     "heartbeat_interval": 30,         # 秒

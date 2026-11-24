@@ -10,14 +10,14 @@ SakuraGTP 科幻自绘控件库。
 from PyQt5.QtWidgets import (
     QWidget, QPushButton, QLineEdit, QComboBox, QCheckBox, QGroupBox,
     QTabBar, QStackedLayout, QVBoxLayout, QSizePolicy, QGraphicsDropShadowEffect,
-    QToolButton,
+    QToolButton, QStyle, QStyleOptionFrame,
 )
 from PyQt5.QtCore import (
     Qt, pyqtProperty, pyqtSignal, QPropertyAnimation, QEasingCurve, QRectF, QPointF, QSize,
 )
 from PyQt5.QtGui import (
     QColor, QPainter, QPen, QBrush, QFont, QPainterPath,
-    QFontMetrics, QLinearGradient,
+    QFontMetrics, QLinearGradient, QPalette,
 )
 
 from sakura.ui import theme
@@ -161,6 +161,64 @@ class GlowComboBox(QComboBox):
         super().focusOutEvent(event)
         if self.graphicsEffect() is not None:
             _fade_effect(self, self.graphicsEffect(), 0, 220)
+
+
+# ============================================================ 路径输入框（省略显示 + 完整历史）
+class ElidedLineEdit(QLineEdit):
+    """未获得焦点时用省略号显示长文本，获得焦点后正常显示并允许编辑。
+
+    用于引擎/权重/配置/命令行这类长路径：输入框里可以省略，
+    但下拉列表中的历史项仍然是完整路径（列表不设省略）。
+    """
+
+    def paintEvent(self, event):
+        if self.hasFocus():
+            super().paintEvent(event)
+            return
+
+        painter = QPainter(self)
+        option = QStyleOptionFrame()
+        self.initStyleOption(option)
+        self.style().drawPrimitive(QStyle.PE_PanelLineEdit, option, painter, self)
+        rect = self.style().subElementRect(QStyle.SE_LineEditContents, option, self)
+        rect = rect.adjusted(2, 0, -2, 0)
+        metrics = QFontMetrics(self.font())
+
+        text = self.text()
+        if text:
+            text = metrics.elidedText(text, Qt.ElideMiddle, rect.width())
+            painter.setPen(self.palette().color(QPalette.Text))
+        else:
+            text = metrics.elidedText(self.placeholderText(), Qt.ElideRight, rect.width())
+            painter.setPen(self.palette().color(QPalette.PlaceholderText))
+        painter.drawText(rect, Qt.AlignVCenter | Qt.AlignLeft, text)
+        painter.end()
+
+
+class PathComboBox(GlowComboBox):
+    """可编辑下拉框：输入框按需省略，下拉历史显示完整文本。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setEditable(True)
+        self.setMinimumHeight(34)
+        # 不再按最长条目撑开布局，避免把右侧「浏览」按钮挤出可见区域
+        self.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.setMinimumContentsLength(12)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setMinimumWidth(120)
+        self.setLineEdit(ElidedLineEdit(self))
+
+    def showPopup(self):
+        view = self.view()
+        # 下拉列表按最宽的历史项展开，完整显示长路径；不超过屏幕可用宽度
+        width = view.sizeHintForColumn(0) + 40
+        screen = self.screen()
+        if screen is not None:
+            width = min(width, screen.availableGeometry().width() - 80)
+        view.setMinimumWidth(max(self.width(), width))
+        view.setTextElideMode(Qt.ElideNone)
+        super().showPopup()
 
 
 # ============================================================ 切换闪光复选框

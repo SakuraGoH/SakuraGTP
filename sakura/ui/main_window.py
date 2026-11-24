@@ -26,7 +26,7 @@ from sakura.ui import theme
 from sakura.ui.theme import build_app_stylesheet, placeholder_color, is_dark, set_active_palette, sci_fi_bg
 from sakura.ui.widgets import (
     GlowButton, GlowLineEdit, GlowComboBox, GlowCheckBox,
-    HudGroupBox, SciFiTabWidget,
+    PathComboBox, HudGroupBox, SciFiTabWidget,
 )
 from sakura.ui.starfield import Starfield, DAY_CYCLE_SEC
 from sakura.ui.starcursor import make_star_cursor, StarTrailWidget
@@ -54,7 +54,7 @@ class SakuraGTPApp(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("SakuraGTP 1.6.6 - 野狐围棋 AI 连线器")
+        self.setWindowTitle("SakuraGTP 1.6.7 - 野狐围棋 AI 连线器")
         self.resize(1800, 1000)
         self.setMinimumSize(1480, 860)
 
@@ -337,45 +337,41 @@ class SakuraGTPApp(QMainWindow):
         engine_form.setHorizontalSpacing(8)
         engine_form.setContentsMargins(8, 8, 8, 8)
 
-        self.engine_combo = GlowComboBox()
-        self.engine_combo.setEditable(True)
+        self.engine_combo = PathComboBox()
         self.engine_combo.addItems(self.cfg.get("engine_history", []))
         self.engine_combo.setCurrentText(self.cfg.get("engine_path", ""))
-        self.engine_combo.setMinimumHeight(34)
         self.btn_browse_engine = GlowButton("浏览")
         self.btn_browse_engine.clicked.connect(self._browse_engine)
         row = QHBoxLayout()
-        row.addWidget(self.engine_combo)
+        row.addWidget(self.engine_combo, stretch=1)
         row.addWidget(self.btn_browse_engine)
         engine_form.addRow("引擎:", row)
 
-        self.weight_combo = GlowComboBox()
-        self.weight_combo.setEditable(True)
+        self.weight_combo = PathComboBox()
         self.weight_combo.addItems(self.cfg.get("weight_history", []))
         self.weight_combo.setCurrentText(self.cfg.get("weight_path", ""))
-        self.weight_combo.setMinimumHeight(34)
         self.btn_browse_weight = GlowButton("浏览")
         self.btn_browse_weight.clicked.connect(self._browse_weight)
         row = QHBoxLayout()
-        row.addWidget(self.weight_combo)
+        row.addWidget(self.weight_combo, stretch=1)
         row.addWidget(self.btn_browse_weight)
         engine_form.addRow("权重:", row)
 
-        self.config_combo = GlowComboBox()
-        self.config_combo.setEditable(True)
+        self.config_combo = PathComboBox()
         self.config_combo.addItems(self.cfg.get("config_history", []))
         self.config_combo.setCurrentText(self.cfg.get("config_path", ""))
-        self.config_combo.setMinimumHeight(34)
         self.btn_browse_config = GlowButton("浏览")
         self.btn_browse_config.clicked.connect(self._browse_config)
         row = QHBoxLayout()
-        row.addWidget(self.config_combo)
+        row.addWidget(self.config_combo, stretch=1)
         row.addWidget(self.btn_browse_config)
         engine_form.addRow("配置:", row)
 
         comm_row = QHBoxLayout()
-        self.comm_cmd_edit = GlowLineEdit(self.cfg.get("comm_cmd", ""))
-        self.comm_cmd_edit.setPlaceholderText(
+        self.comm_cmd_edit = PathComboBox()
+        self.comm_cmd_edit.addItems(self.cfg.get("comm_cmd_history", []))
+        self.comm_cmd_edit.setCurrentText(self.cfg.get("comm_cmd", ""))
+        self.comm_cmd_edit.lineEdit().setPlaceholderText(
             '通用命令行（本地或 plink/ikatago），例如: plink -ssh ...'
         )
         comm_row.addWidget(self.comm_cmd_edit, stretch=1)
@@ -788,7 +784,7 @@ class SakuraGTPApp(QMainWindow):
                 parts.append(f'-w "{weight}"')
             if config:
                 parts.append(f'--config "{config}"')
-        self.comm_cmd_edit.setText(" ".join(parts))
+        self.comm_cmd_edit.setCurrentText(" ".join(parts))
 
     def _check_cmd_match(self, cmd, engine, weight, config):
         if not engine:
@@ -857,11 +853,11 @@ class SakuraGTPApp(QMainWindow):
         engine_path = self.engine_combo.currentText().strip()
         weight_path = self.weight_combo.currentText().strip()
         config_path = self.config_combo.currentText().strip()
-        comm_cmd = self.comm_cmd_edit.text().strip()
+        comm_cmd = self.comm_cmd_edit.currentText().strip()
 
         if not comm_cmd:
             self._auto_gen_cmd()
-            comm_cmd = self.comm_cmd_edit.text().strip()
+            comm_cmd = self.comm_cmd_edit.currentText().strip()
 
         ok, msg = self._check_cmd_match(comm_cmd, engine_path, weight_path, config_path)
         if not ok:
@@ -904,6 +900,8 @@ class SakuraGTPApp(QMainWindow):
             push_history(self.cfg, "weight_history", weight_path)
         if config_path:
             push_history(self.cfg, "config_history", config_path)
+        if comm_cmd:
+            push_history(self.cfg, "comm_cmd_history", comm_cmd)
 
         self.engine_combo.clear()
         self.engine_combo.addItems(self.cfg["engine_history"])
@@ -916,6 +914,10 @@ class SakuraGTPApp(QMainWindow):
         self.config_combo.clear()
         self.config_combo.addItems(self.cfg["config_history"])
         self.config_combo.setCurrentText(config_path)
+
+        self.comm_cmd_edit.clear()
+        self.comm_cmd_edit.addItems(self.cfg.get("comm_cmd_history", []))
+        self.comm_cmd_edit.setCurrentText(comm_cmd)
 
         save_config(self.cfg)
 
@@ -1667,7 +1669,7 @@ class SakuraGTPApp(QMainWindow):
         self.cfg["engine_path"] = self.engine_combo.currentText()
         self.cfg["weight_path"] = self.weight_combo.currentText()
         self.cfg["config_path"] = self.config_combo.currentText()
-        self.cfg["comm_cmd"] = self.comm_cmd_edit.text()
+        self.cfg["comm_cmd"] = self.comm_cmd_edit.currentText()
         try:
             self.cfg["fox_listen_port"] = int(self.fox_port_edit.text())
         except ValueError:
@@ -1827,7 +1829,7 @@ class SakuraGTPApp(QMainWindow):
             "path": self.engine_combo.currentText(),
             "weight": self.weight_combo.currentText(),
             "config": self.config_combo.currentText(),
-            "comm_cmd": self.comm_cmd_edit.text(),
+            "comm_cmd": self.comm_cmd_edit.currentText(),
             "ssh_host": self.ssh_host_edit.text(),
             # 方言探测结果，方便外部排查「为什么某条命令没发」
             "dialect": {
@@ -1926,7 +1928,7 @@ class SakuraGTPApp(QMainWindow):
     def _show_env_help(self):
         QMessageBox.information(
             self, "依赖环境",
-            "SakuraGTP 1.6.6 依赖环境\n\n"
+            "SakuraGTP 1.6.7 依赖环境\n\n"
             "Windows 10 / 11，64 位\n"
             "VC++ 2010 x86 / VC++ 2015-2022 x64\n"
             "AI 引擎 (KataGo / LeelaZero)\n"
@@ -1954,7 +1956,7 @@ class SakuraGTPApp(QMainWindow):
     def _show_about(self):
         QMessageBox.information(
             self, "关于",
-            "SakuraGTP 1.6.6\n野狐围棋 AI 连线器"
+            "SakuraGTP 1.6.7\n野狐围棋 AI 连线器"
         )
 
     # ============================================================ 关闭
