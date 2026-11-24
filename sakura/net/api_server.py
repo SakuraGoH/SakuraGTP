@@ -103,7 +103,7 @@ class APIServer:
                 if path == "/":
                     self._send_json({
                         "name": "SakuraGTP API",
-                        "version": "1.6.7",
+                        "version": "1.6.8",
                         "auth": server.token_enabled,
                         "endpoints": [
                             "GET /status",
@@ -123,7 +123,7 @@ class APIServer:
                     })
                     return
                 if path == "/version":
-                    self._send_json({"version": "1.6.7"})
+                    self._send_json({"version": "1.6.8"})
                     return
                 if path == "/status":
                     self._send_json(app._api_status())

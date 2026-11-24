@@ -303,14 +303,22 @@ class Dialect:
     def time_left_commands(self, color, main_time, byo_time, byo_count):
         """每手同步剩余时间。
 
-        GTP 的 ``time_left C m b``：m 为本方剩余保留时间，b 为读秒周期。
-        保留时间用完后 m 必须给 0，引擎才会进入读秒计算。
+        GTP 的 ``time_left C time stones`` 里，*time* 是**当前计时段还剩的
+        秒数**（主时间，或读秒周期），*stones* 是当前读秒周期还剩的子数。
+
+        主时间用完后必须把读秒秒数填进第一个字段：旧实现一直填
+        ``(剩余主时间, 读秒秒数)``，主时间归零后就成了 ``time_left W 0 9``，
+        引擎会认为自己只剩 0 秒，直接落子（iKatago 上的「秒下」）。
         """
         if not self.profile.time_left:
             return []
-        byo, _stones = self._byoyomi(byo_time, byo_count)
+        byo, stones = self._byoyomi(byo_time, byo_count)
         main = max(0, int(main_time))
-        return ["time_left %s %d %d" % (color.upper(), main, byo)]
+        if main > 0:
+            return ["time_left %s %d 0" % (color.upper(), main)]
+        if byo > 0:
+            return ["time_left %s %d %d" % (color.upper(), byo, stones)]
+        return ["time_left %s 0 0" % color.upper()]
 
     def rules_command(self, rule):
         rule = (rule or "").strip().lower()

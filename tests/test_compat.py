@@ -231,6 +231,38 @@ class BridgeTest(unittest.TestCase):
         self.assertEqual(played[0], "B")
         self.assertEqual(played[1], "2^15^3^B")
 
+    def test_time_left_after_main_time_exhausted(self):
+        """主时间归零后，time_left 必须把读秒秒数放进第一个字段。
+
+        旧实现发 ``time_left W 0 30``，引擎认为只剩 0 秒直接落子（秒下）。
+        """
+        bridge, mgr, _sink, _logs = make_bridge("katago")
+        self.bridge = bridge
+        bridge.handle_fox_command("FARULE", ["19", "60", "30", "5", "650"])
+        mgr.mock.clear()
+
+        bridge.handle_fox_command("FATIMELEFT", ["0", "30", "5"])
+        bridge.handle_fox_command("FAMOVE", ["1", "B", "1^3^3^W"])
+
+        sent = [c for _i, c in mgr.mock.received]
+        self.assertIn("time_left B 30 1", sent,
+                      "主时间 0 时应发读秒秒数，实际 %r" % sent)
+        self.assertNotIn("time_left B 0 30", sent,
+                         "不能把 0 秒发给引擎，会导致秒下")
+
+    def test_time_left_keeps_main_time(self):
+        bridge, mgr, _sink, _logs = make_bridge("katago")
+        self.bridge = bridge
+        bridge.handle_fox_command("FARULE", ["19", "60", "30", "5", "650"])
+        mgr.mock.clear()
+
+        bridge.handle_fox_command("FATIMELEFT", ["45", "30", "5"])
+        bridge.handle_fox_command("FAMOVE", ["1", "B", "1^3^3^W"])
+
+        sent = [c for _i, c in mgr.mock.received]
+        self.assertIn("time_left B 45 0", sent,
+                      "主时间阶段第二个字段应给 0，实际 %r" % sent)
+
     def test_candidates_cleared_when_opponent_to_move(self):
         """对手回合不能在棋盘上留下 AI 的候选点。"""
         seen = []
@@ -617,6 +649,35 @@ class ParseTest(unittest.TestCase):
         self.assertEqual(Dialect.format_komi(7), "7")
         self.assertEqual(Dialect.format_komi(6.75), "6.75")
         self.assertEqual(Dialect.format_komi(0.5), "0.5")
+
+    def test_time_left_main_phase(self):
+        """主时间还在：第一个字段是主时间，第二个字段必须是 0。"""
+        d = self.dialect
+        self.assertEqual(d.time_left_commands("W", 60, 30, 5),
+                         ["time_left W 60 0"])
+        self.assertEqual(d.time_left_commands("B", 12, 30, 5),
+                         ["time_left B 12 0"])
+
+    def test_time_left_byoyomi_phase(self):
+        """主时间归零：第一个字段必须是读秒秒数，不能是 0。
+
+        旧实现发 ``time_left W 0 30``，引擎认为只剩 0 秒，直接落子，
+        iKatago 上表现为「秒下」。
+        """
+        d = self.dialect
+        self.assertEqual(d.time_left_commands("W", 0, 30, 5),
+                         ["time_left W 30 1"])
+
+    def test_time_left_byoyomi_count_option(self):
+        d = self.dialect
+        d.use_go_byoyomi = True
+        self.assertEqual(d.time_left_commands("W", 0, 30, 5),
+                         ["time_left W 30 5"])
+
+    def test_time_left_zero_time(self):
+        d = self.dialect
+        self.assertEqual(d.time_left_commands("W", 0, 0, 5),
+                         ["time_left W 0 0"])
 
 
 if __name__ == "__main__":
