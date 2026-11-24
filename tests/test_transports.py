@@ -10,7 +10,7 @@ import unittest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-from engine_manager import EngineManager  # noqa: E402
+from sakura.engine.manager import EngineManager  # noqa: E402
 
 
 def wait_for(predicate, timeout=5.0):

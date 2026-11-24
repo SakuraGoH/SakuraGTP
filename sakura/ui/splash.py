@@ -16,8 +16,8 @@ from PyQt5.QtGui import (
     QConicalGradient, QLinearGradient,
 )
 
-from starfield import Starfield
-from theme import pal
+from sakura.ui.starfield import Starfield
+from sakura.ui.theme import pal
 
 PHASES = [
     "校准星图坐标 ...",

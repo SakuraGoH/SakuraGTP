@@ -29,9 +29,9 @@ $name = "SakuraGTP-v$Version"
 $common = @(
     "--noconfirm", "--clean", "--windowed",
     "--name", $name,
-    "--icon", "sakura.ico",
-    "--add-data", "sakura.ico;.",
-    "--add-data", "SakuraGTP HTTP API 文档.md;.",
+    "--icon", "sakura/resources/sakura.ico",
+    "--add-data", "sakura/resources/sakura.ico;.",
+    "--add-data", "sakura/resources/SakuraGTP HTTP API 文档.md;.",
     "--hidden-import", "PyQt5", "--hidden-import", "PIL", "--hidden-import", "paramiko"
 )
 

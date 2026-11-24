@@ -20,7 +20,7 @@ from PyQt5.QtGui import (
     QFontMetrics, QLinearGradient,
 )
 
-import theme
+from sakura.ui import theme
 
 
 def _accent():

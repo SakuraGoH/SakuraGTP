@@ -14,23 +14,23 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QEvent
 from PyQt5.QtGui import QColor, QPalette, QPainter, QTextCursor
 
-from config import load_config, save_config, push_history
-from engine_manager import EngineManager
-from fox_client import FoxClientServer
-from gtp_bridge import GTPBridge
-from board_view import BoardView
-from winrate_view import WinrateView
-from api_server import APIServer
-from runner import ContributeRunner
-import theme
-from theme import build_app_stylesheet, placeholder_color, is_dark, set_active_palette, sci_fi_bg
-from sci_widgets import (
+from sakura.core.config import load_config, save_config, push_history
+from sakura.engine.manager import EngineManager
+from sakura.net.fox_client import FoxClientServer
+from sakura.engine.bridge import GTPBridge
+from sakura.ui.board import BoardView
+from sakura.ui.winrate import WinrateView
+from sakura.net.api_server import APIServer
+from sakura.core.runner import ContributeRunner
+from sakura.ui import theme
+from sakura.ui.theme import build_app_stylesheet, placeholder_color, is_dark, set_active_palette, sci_fi_bg
+from sakura.ui.widgets import (
     GlowButton, GlowLineEdit, GlowComboBox, GlowCheckBox,
     HudGroupBox, SciFiTabWidget,
 )
-from starfield import Starfield, DAY_CYCLE_SEC
-from starcursor import make_star_cursor, StarTrailWidget
-import ui_dialogs
+from sakura.ui.starfield import Starfield, DAY_CYCLE_SEC
+from sakura.ui.starcursor import make_star_cursor, StarTrailWidget
+from sakura.ui import dialogs as ui_dialogs
 
 # 只过滤这一种：kata-genmove_analyze / lz-analyze 的分析流，每 50ms 一批、
 # 单行上万字符。除此之外的引擎输出（GTP 响应、showboard 棋盘、KataGo 日志、
@@ -1604,10 +1604,8 @@ class SakuraGTPApp(QMainWindow):
         ctrl.addStretch()
         layout.addLayout(ctrl)
 
-        doc_path = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)),
-            "SakuraGTP HTTP API 文档.md"
-        )
+        from sakura.core.paths import resource_path
+        doc_path = resource_path("SakuraGTP HTTP API 文档.md")
         if os.path.exists(doc_path):
             link = QLabel(
                 f'<a href="file:///{doc_path}" '

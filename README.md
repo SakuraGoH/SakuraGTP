@@ -56,6 +56,29 @@ Two useful config keys for byo-yomi translation (in `sakura_config.json`, matchi
 
 ---
 
+## Project layout
+
+```
+sakura/
+  app.py            application entry (QApplication + main window)
+  __main__.py       `python -m sakura`
+  core/             config, Fox protocol, paths, contribute runner
+  engine/           GTP session / dialect / bridge, engine manager (stdio, TCP, SSH)
+  net/              Fox client listener, HTTP API server
+  ui/               main window, dialogs, board, winrate, theme, widgets
+  resources/        icon and bundled API document
+main.py             thin entry (python main.py / PyInstaller)
+tests/              unit tests and manual engine scripts
+tools/              release signing helpers
+certs/              public code-signing certificate (private .pfx is ignored)
+docs/               manuals and notes
+build.ps1           build + sign script
+```
+
+Run from source with either `python main.py` or `python -m sakura`.
+
+---
+
 ## Requirements
 
 - **Python**: 3.8 or later
@@ -162,8 +185,8 @@ Manual equivalent for the portable build:
 
 ```powershell
 pyinstaller --onedir --windowed --name SakuraGTP `
-    --add-data "sakura.ico;." `
-    --add-data "SakuraGTP HTTP API 文档.md;." `
+    --add-data "sakura/resources/sakura.ico;." `
+    --add-data "sakura/resources/SakuraGTP HTTP API 文档.md;." `
     --hidden-import=PyQt5 --hidden-import=PIL --hidden-import=paramiko `
     main.py
 ```

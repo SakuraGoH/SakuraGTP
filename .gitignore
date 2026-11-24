@@ -7,7 +7,6 @@ __pycache__/
 build/
 dist/
 *.spec
-!FoxGTP-Py/FoxGTP-Py.spec
 
 # Local runtime config (contains machine-specific paths)
 sakura_config.json

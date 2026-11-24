@@ -3,7 +3,7 @@ import sys
 import threading
 import time
 
-from protocol_fox import parse_packet, build_packet
+from sakura.core.protocol_fox import parse_packet, build_packet
 
 
 def _enable_keepalive(sock, idle=10, interval=3, count=5):

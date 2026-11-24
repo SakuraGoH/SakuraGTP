@@ -21,8 +21,8 @@ import time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-from engine_manager import EngineManager  # noqa: E402
-from gtp_bridge import GTPBridge  # noqa: E402
+from sakura.engine.manager import EngineManager  # noqa: E402
+from sakura.engine.bridge import GTPBridge  # noqa: E402
 
 DEFAULT_CMD = (
     r'"C:/Users/10632/Desktop/PhoenixGo/PhoenixGo-master/out/Release/mcts_main.exe" '

@@ -17,8 +17,8 @@ import time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-from engine_manager import EngineManager
-from gtp_bridge import GTPBridge
+from sakura.engine.manager import EngineManager
+from sakura.engine.bridge import GTPBridge
 
 EXE = os.environ.get("KATAGO_EXE", r"C:\KataGo\katago.exe")
 MODEL = os.environ.get("KATAGO_MODEL", r"C:\KataGo\model.onnx")

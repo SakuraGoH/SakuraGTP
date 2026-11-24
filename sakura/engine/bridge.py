@@ -24,8 +24,8 @@ import re
 import threading
 import time
 
-from gtp_dialect import (Dialect, EngineProfile, VERTEX_LETTERS, probe)
-from gtp_session import GTPResponse, GTPSession, looks_like_vertex
+from sakura.engine.dialect import (Dialect, EngineProfile, VERTEX_LETTERS, probe)
+from sakura.engine.session import GTPResponse, GTPSession, looks_like_vertex
 
 
 class GTPBridge:

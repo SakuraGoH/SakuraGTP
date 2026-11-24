@@ -2,13 +2,12 @@ import json
 import os
 import sys
 
-from theme import sci_fi_bg
+from sakura.core.paths import app_dir
+from sakura.ui.theme import sci_fi_bg
 
 
 def get_config_dir():
-    if getattr(sys, "frozen", False):
-        return os.path.dirname(sys.executable)
-    return os.path.dirname(os.path.abspath(__file__))
+    return app_dir()
 
 
 CONFIG_FILE = os.path.join(get_config_dir(), "sakura_config.json")

@@ -19,7 +19,7 @@ def wait_for(predicate, timeout=5.0):
         time.sleep(0.01)
     return False
 
-from gtp_bridge import GTPBridge          # noqa: E402
+from sakura.engine.bridge import GTPBridge          # noqa: E402
 from mock_engine import MockEngine        # noqa: E402
 
 
@@ -511,7 +511,7 @@ class EngineWriteQueueTest(unittest.TestCase):
     """
 
     def test_send_never_blocks_on_full_pipe(self):
-        from engine_manager import EngineManager
+        from sakura.engine.manager import EngineManager
 
         class SlowStdin:
             def write(self, _data):
@@ -586,7 +586,7 @@ class ParseTest(unittest.TestCase):
     """纯解析单元测试（不起引擎）。"""
 
     def setUp(self):
-        from gtp_dialect import Dialect, EngineProfile
+        from sakura.engine.dialect import Dialect, EngineProfile
         prof = EngineProfile()
         self.dialect = Dialect(prof)
 
@@ -612,7 +612,7 @@ class ParseTest(unittest.TestCase):
         self.assertEqual(d.parse_score(""), "error")
 
     def test_komi_format(self):
-        from gtp_dialect import Dialect
+        from sakura.engine.dialect import Dialect
         self.assertEqual(Dialect.format_komi(6.5), "6.5")
         self.assertEqual(Dialect.format_komi(7), "7")
         self.assertEqual(Dialect.format_komi(6.75), "6.75")
