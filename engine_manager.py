@@ -55,6 +55,8 @@ class EngineManager:
         # 命令顺序与 FoxGTP 一致（先全部 play，随后立刻 genmove）。
         self._write_queue = queue.Queue()
         self._writer_thread = None
+        # 写线程的代际：stop/重启时自增，旧线程据此自行退出
+        self._writer_gen = 0
 
     def force_reconnect(self):
         """心跳判定假死时由桥接层调用：TCP 模式下直接触发重连。"""
@@ -386,13 +388,29 @@ class EngineManager:
     def _start_writer(self):
         if self._writer_thread is not None and self._writer_thread.is_alive():
             return
-        self._writer_thread = threading.Thread(target=self._write_loop, daemon=True)
+        # 新会话开始：清掉上一次停止时可能残留的旧命令/退出信号
+        self._drain_writes()
+        self._writer_gen += 1
+        gen = self._writer_gen
+        self._writer_thread = threading.Thread(
+            target=self._write_loop, args=(gen,), daemon=True)
         self._writer_thread.start()
 
-    def _write_loop(self):
-        while True:
-            text = self._write_queue.get()
+    def _write_loop(self, gen):
+        """写线程：只在属于自己这一代时工作。
+
+        stop() 会把 _writer_gen 加一，旧线程最多 0.2 秒后自行退出；
+        这样重启引擎时不会出现「旧写线程吃掉新命令」或「残留退出信号
+        让新写线程立刻退出」的问题。
+        """
+        while gen == self._writer_gen:
+            try:
+                text = self._write_queue.get(timeout=0.2)
+            except queue.Empty:
+                continue
             if text is None:
+                break
+            if gen != self._writer_gen:
                 break
             try:
                 if self._sock is not None:
@@ -503,8 +521,9 @@ class EngineManager:
                     except Exception:
                         pass
                 self.proc = None
-            # 通知写线程退出
-            self._write_queue.put(None)
+            # 让旧写线程退出（代际 +1 后它最多 0.2 秒自行结束），
+            # 不再往队列里塞 None，避免残留信号把重启后的新写线程顶掉。
+            self._writer_gen += 1
             if self._writer_thread is not None:
                 self._writer_thread.join(1.0)
                 self._writer_thread = None

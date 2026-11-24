@@ -54,7 +54,7 @@ class SakuraGTPApp(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("SakuraGTP 1.6.5 - 野狐围棋 AI 连线器")
+        self.setWindowTitle("SakuraGTP 1.6.6 - 野狐围棋 AI 连线器")
         self.resize(1800, 1000)
         self.setMinimumSize(1480, 860)
 
@@ -91,6 +91,8 @@ class SakuraGTPApp(QMainWindow):
         self._detached_view = None
         self.api_window = None
         self._restarting_engine = False
+        # 重启引擎期间旧进程的退出信号要忽略，否则会把刚起来的新引擎再停掉
+        self._suppress_engine_exit_until = 0.0
 
         self.api_server = APIServer(self, on_log=self._log_comm)
         self.runner = ContributeRunner(on_log=self._log_comm)
@@ -993,6 +995,9 @@ class SakuraGTPApp(QMainWindow):
         self.comm_cmd_edit.setEnabled(not locked)
 
     def _on_engine_exit_signal(self):
+        if time.time() < self._suppress_engine_exit_until:
+            self._log_comm("（忽略重启期间旧引擎的退出信号）")
+            return
         self.engine_exit_signal.emit()
 
     def _on_engine_connected(self):
@@ -1212,6 +1217,7 @@ class SakuraGTPApp(QMainWindow):
         if not self.engine.is_running():
             return
         self._restarting_engine = True
+        self._suppress_engine_exit_until = time.time() + 5.0
         self._log_comm("对局结束：正在重启 AI 引擎…")
         try:
             self._stop_engine()
@@ -1922,7 +1928,7 @@ class SakuraGTPApp(QMainWindow):
     def _show_env_help(self):
         QMessageBox.information(
             self, "依赖环境",
-            "SakuraGTP 1.6.5 依赖环境\n\n"
+            "SakuraGTP 1.6.6 依赖环境\n\n"
             "Windows 10 / 11，64 位\n"
             "VC++ 2010 x86 / VC++ 2015-2022 x64\n"
             "AI 引擎 (KataGo / LeelaZero)\n"
@@ -1950,7 +1956,7 @@ class SakuraGTPApp(QMainWindow):
     def _show_about(self):
         QMessageBox.information(
             self, "关于",
-            "SakuraGTP 1.6.5\n野狐围棋 AI 连线器"
+            "SakuraGTP 1.6.6\n野狐围棋 AI 连线器"
         )
 
     # ============================================================ 关闭

@@ -111,5 +111,76 @@ class TcpTransportTest(unittest.TestCase):
         self.assertFalse(manager.is_running())
 
 
+class WriterLifecycleTest(unittest.TestCase):
+    """写线程生命周期：重启引擎后必须还能把命令写出去。
+
+    旧实现用 None 作为写线程退出信号；stop() 被调用两次（重启时界面的
+    stop 和引擎退出回调各一次）会在队列里留下没人消费的 None，重启后新
+    写线程读到它立刻退出，表现为「引擎在跑、但一条命令都发不进去」。
+    """
+
+    class FakeStdin:
+        def __init__(self):
+            self.data = []
+
+        def write(self, payload):
+            self.data.append(payload)
+
+        def flush(self):
+            pass
+
+    class FakeProc:
+        def __init__(self):
+            self.stdin = WriterLifecycleTest.FakeStdin()
+
+        def poll(self):
+            return None
+
+    def _wait_written(self, proc, needle, timeout=3.0):
+        end = time.time() + timeout
+        while time.time() < end:
+            if any(needle in item for item in proc.stdin.data):
+                return True
+            time.sleep(0.02)
+        return False
+
+    def test_writer_survives_stale_stop_sentinel(self):
+        manager = EngineManager()
+        proc = self.FakeProc()
+        manager.proc = proc
+        manager._running = True
+        manager._write_queue.put(None)          # 上一次 stop 的残留
+        manager._start_writer()
+        try:
+            manager.send("1 name")
+            self.assertTrue(self._wait_written(proc, b"1 name"),
+                            "残留的退出信号不应影响新写线程")
+        finally:
+            manager._writer_gen += 1
+            manager._writer_thread.join(1.0)
+
+    def test_writer_restarts_after_stop(self):
+        manager = EngineManager()
+        proc = self.FakeProc()
+        manager.proc = proc
+        manager._running = True
+        manager._start_writer()
+        manager.send("1 first")
+        self.assertTrue(self._wait_written(proc, b"1 first"))
+
+        manager._writer_gen += 1                # 模拟 stop
+        manager._writer_thread.join(1.0)
+        manager._writer_thread = None
+
+        manager._start_writer()
+        try:
+            manager.send("2 second")
+            self.assertTrue(self._wait_written(proc, b"2 second"),
+                            "重启后新写线程必须能继续工作")
+        finally:
+            manager._writer_gen += 1
+            manager._writer_thread.join(1.0)
+
+
 if __name__ == "__main__":
     unittest.main()
